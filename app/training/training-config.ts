@@ -6,6 +6,7 @@
 import { Item, ItemRecipe } from "../types/enum/Item"
 import { Pkm } from "../types/enum/Pokemon"
 import { Synergy, SynergyArray } from "../types/enum/Synergy"
+import { Weather } from "../types/enum/Weather"
 
 // Number of bot opponents in training games
 export const TRAINING_NUM_OPPONENTS = 7
@@ -29,20 +30,24 @@ export const OBS_SHOP_FEATURES = 9 // per slot: hasUnit, species, rarity, cost, 
 export const OBS_BOARD_SLOTS = 32 // 8x4 grid (y=0 bench, y=1-3 board)
 export const OBS_BOARD_FEATURES_PER_SLOT = 12 // hasUnit, species, stars, rarity, type1-4, atk, hp, range, numItems
 export const OBS_HELD_ITEMS = 10 // up to 10 held items (normalized item indices)
-export const OBS_SYNERGIES = 32 // 32 synergy types (padded, actual is 31)
-export const OBS_GAME_INFO = 4 // stageLevel, phase, playersAlive, hasPropositions
-export const OBS_OPPONENT_STATS = 16 // 2 features per opponent (life, rank) * 8 max opponents
-export const OBS_PROPOSITION_SLOTS = MAX_PROPOSITIONS // 6 proposition slots
-export const OBS_PROPOSITION_FEATURES = 3 // rarity, numTypes, hasItem
+export const OBS_SYNERGIES = 31 // 31 synergy types (matches SynergyArray.length)
+export const OBS_GAME_INFO = 7 // stageLevel, phase, playersAlive, hasPropositions, weatherIndex, isPVE, maxTeamSize
+export const OBS_OPPONENT_COUNT = 7
+export const OBS_OPPONENT_FEATURES = 10 // life, rank, level, gold, streak, boardSize, topSyn1Idx, topSyn1Count, topSyn2Idx, topSyn2Count
+export const OBS_OPPONENT_STATS = OBS_OPPONENT_COUNT * OBS_OPPONENT_FEATURES // 70
+export const OBS_PROPOSITION_SLOTS = 6
+export const OBS_PROPOSITION_FEATURES = 7 // species, rarity, type1-4, hasItem
 
 export const TOTAL_OBS_SIZE =
-  OBS_PLAYER_STATS +
-  OBS_SHOP_SLOTS +
-  OBS_BOARD_SLOTS * OBS_BOARD_FEATURES_PER_SLOT +
-  OBS_SYNERGIES +
-  OBS_GAME_INFO +
-  OBS_OPPONENT_STATS +
-  OBS_PROPOSITION_SLOTS * OBS_PROPOSITION_FEATURES
+  OBS_PLAYER_STATS +                                  // 14
+  OBS_SHOP_SLOTS * OBS_SHOP_FEATURES +                // 54
+  OBS_BOARD_SLOTS * OBS_BOARD_FEATURES_PER_SLOT +     // 384
+  OBS_HELD_ITEMS +                                     // 10
+  OBS_SYNERGIES +                                      // 31
+  OBS_GAME_INFO +                                      // 7
+  OBS_OPPONENT_STATS +                                 // 70
+  OBS_PROPOSITION_SLOTS * OBS_PROPOSITION_FEATURES     // 42
+  // = 612
 
 // Action space (92-action layout, aligned with agent-io API)
 //
@@ -165,4 +170,15 @@ const NUM_ITEMS = AllItems.length
 
 export function getItemIndex(item: Item): number {
   return ((ItemToIndex.get(item) ?? 0) + 1) / NUM_ITEMS
+}
+
+// ─── Weather-index lookup ────────────────────────────────────────────
+
+const WeatherValues = Object.values(Weather)
+const WeatherToIndex = new Map<string, number>()
+WeatherValues.forEach((w, i) => WeatherToIndex.set(w, i))
+const NUM_WEATHERS = WeatherValues.length
+
+export function getWeatherIndex(weather: Weather): number {
+  return ((WeatherToIndex.get(weather) ?? 0) + 1) / NUM_WEATHERS
 }

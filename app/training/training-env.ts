@@ -62,11 +62,14 @@ import {
   getItemIndex,
   getPkmSpeciesIndex,
   getSynergyIndex,
+  getWeatherIndex,
   GRID_CELLS,
   GRID_HEIGHT,
   GRID_WIDTH,
   MAX_PROPOSITIONS,
   OBS_HELD_ITEMS,
+  OBS_OPPONENT_COUNT,
+  OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
   REWARD_PER_DRAW,
@@ -1288,13 +1291,13 @@ export class TrainingEnv {
       }
     }
 
-    // Synergies (32 values, normalized)
+    // ── Synergies (31 values, normalized) ─────────────────────────────
     for (const synergy of SynergyArray) {
       const val = agent.synergies.get(synergy) ?? 0
-      obs.push(val / 10) // normalize
+      obs.push(val / 10)
     }
 
-    // Game info (4)
+    // ── Game info (7) ──────────────────────────────────────────────────
     obs.push(this.state.stageLevel / 50)
     obs.push(this.state.phase / 2)
     const playersAlive = values(this.state.players).filter(
@@ -1302,28 +1305,69 @@ export class TrainingEnv {
     ).length
     obs.push(playersAlive / 8)
     obs.push(agent.pokemonsProposition.length > 0 ? 1 : 0) // hasPropositions
+    obs.push(
+      this.state.weather
+        ? getWeatherIndex(this.state.weather as Weather)
+        : 0
+    ) // weatherIndex
+    obs.push(this.state.stageLevel in PVEStages ? 1 : 0) // isPVE
+    obs.push(
+      getMaxTeamSize(
+        agent.experienceManager.level,
+        this.state.specialGameRule
+      ) / 9
+    ) // maxTeamSize
 
-    // Opponent stats (16 = 8 opponents * 2 features)
+    // ── Opponents (7 × 10 features = 70) ──────────────────────────────
     const opponents = values(this.state.players).filter(
-      (p) => p.id !== targetId
+      (p) => p.id !== targetId && p.alive
     )
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < OBS_OPPONENT_COUNT; i++) {
       if (i < opponents.length) {
-        obs.push(opponents[i].life / 100)
-        obs.push(opponents[i].rank / 8)
+        const opp = opponents[i]
+        obs.push(opp.life / 100)
+        obs.push(opp.rank / 8)
+        obs.push(opp.experienceManager.level / 9)
+        obs.push(opp.money / 100)
+        obs.push(opp.streak / 10)
+        obs.push(opp.boardSize / 9)
+        // Top 2 synergies by count
+        let top1Syn: Synergy | null = null
+        let top1Count = 0
+        let top2Syn: Synergy | null = null
+        let top2Count = 0
+        opp.synergies.forEach((count, syn) => {
+          if (count > top1Count) {
+            top2Syn = top1Syn
+            top2Count = top1Count
+            top1Syn = syn as Synergy
+            top1Count = count
+          } else if (count > top2Count) {
+            top2Syn = syn as Synergy
+            top2Count = count
+          }
+        })
+        obs.push(top1Syn ? getSynergyIndex(top1Syn) : 0)
+        obs.push(top1Count / 10)
+        obs.push(top2Syn ? getSynergyIndex(top2Syn) : 0)
+        obs.push(top2Count / 10)
       } else {
-        obs.push(0, 0)
+        obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 10 zeros
       }
     }
 
-    // Proposition slots (6 slots × 3 features = 18)
-    // Each slot: rarity, numTypes, hasItem
+    // ── Propositions (6 × 7 features = 42) ─────────────────────────────
     const propositions = values(agent.pokemonsProposition) as Pkm[]
-    for (let i = 0; i < MAX_PROPOSITIONS; i++) {
+    for (let i = 0; i < OBS_PROPOSITION_SLOTS; i++) {
       if (i < propositions.length && propositions[i]) {
         const data = getPokemonData(propositions[i])
+        const types = data.types ?? []
+        obs.push(getPkmSpeciesIndex(propositions[i])) // speciesIndex
         obs.push(rarityMap[data.rarity] ?? 0) // rarity
-        obs.push((data.types?.length ?? 0) / 5) // numTypes normalized
+        obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
+        obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
+        obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+        obs.push(0) // type4 (always 0, propositions have no items)
         obs.push(
           agent.itemsProposition.length > i &&
             agent.itemsProposition[i] != null
@@ -1331,7 +1375,7 @@ export class TrainingEnv {
             : 0
         ) // hasItem
       } else {
-        obs.push(0, 0, 0)
+        obs.push(0, 0, 0, 0, 0, 0, 0) // 7 zeros
       }
     }
 
