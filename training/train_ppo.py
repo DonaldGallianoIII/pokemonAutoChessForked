@@ -185,7 +185,7 @@ def train(
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     clip_range: float = 0.2,
-    ent_coef: float = 0.02,
+    ent_coef: float = 0.07,
     save_dir: str = "training/checkpoints",
     log_dir: str = "training/logs",
     resume_from: Optional[str] = None,
@@ -331,7 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
     parser.add_argument("--n-steps", type=int, default=1024, help="Steps per rollout")
-    parser.add_argument("--ent-coef", type=float, default=0.02, help="Entropy coefficient")
+    parser.add_argument("--ent-coef", type=float, default=0.07, help="Entropy coefficient")
     parser.add_argument("--save-dir", default="training/checkpoints", help="Checkpoint directory")
     parser.add_argument("--log-dir", default="training/logs", help="TensorBoard log directory")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint path")
