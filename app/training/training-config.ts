@@ -3,6 +3,10 @@
  * Games run synchronously with no real-time waiting.
  */
 
+import { Item, ItemRecipe } from "../types/enum/Item"
+import { Pkm } from "../types/enum/Pokemon"
+import { Synergy, SynergyArray } from "../types/enum/Synergy"
+
 // Number of bot opponents in training games
 export const TRAINING_NUM_OPPONENTS = 7
 
@@ -93,3 +97,67 @@ export const SELF_PLAY = process.env.SELF_PLAY === "true"
 
 // HTTP server port for training API
 export const TRAINING_API_PORT = parseInt(process.env.TRAINING_PORT ?? "9100")
+
+// ─── Phase 0: Grid & Helper Constants ────────────────────────────────
+
+export const GRID_WIDTH = 8
+export const GRID_HEIGHT = 4 // y=0 bench, y=1-3 board
+export const GRID_CELLS = GRID_WIDTH * GRID_HEIGHT // 32
+export const SHOP_SLOTS = 6
+export const MAX_COMBINE_PAIRS = 6
+export const MAX_HELD_ITEMS = 10 // observation encoding cap
+export const NUM_PKM_SPECIES = Object.values(Pkm).length
+export const NUM_SYNERGIES = SynergyArray.length
+
+export function cellToXY(cell: number): [number, number] {
+  return [cell % GRID_WIDTH, Math.floor(cell / GRID_WIDTH)]
+}
+
+export function xyToCell(x: number, y: number): number {
+  return y * GRID_WIDTH + x
+}
+
+// ─── Item-pair enumeration ───────────────────────────────────────────
+
+export function enumerateItemPairs(items: string[]): [number, number][] {
+  const pairs: [number, number][] = []
+  for (let i = 0; i < items.length && pairs.length < MAX_COMBINE_PAIRS; i++) {
+    for (let j = i + 1; j < items.length && pairs.length < MAX_COMBINE_PAIRS; j++) {
+      pairs.push([i, j])
+    }
+  }
+  return pairs
+}
+
+// ─── Item recipe lookup ──────────────────────────────────────────────
+
+export function findRecipeResult(itemA: Item, itemB: Item): Item | null {
+  for (const [result, ingredients] of Object.entries(ItemRecipe)) {
+    if (
+      (ingredients![0] === itemA && ingredients![1] === itemB) ||
+      (ingredients![0] === itemB && ingredients![1] === itemA)
+    ) {
+      return result as Item
+    }
+  }
+  return null
+}
+
+// ─── Pokemon species-index lookup ────────────────────────────────────
+
+const PkmValues = Object.values(Pkm)
+const PkmToIndex = new Map<string, number>()
+PkmValues.forEach((pkm, i) => PkmToIndex.set(pkm, i))
+
+export function getPkmSpeciesIndex(pkm: Pkm): number {
+  return (PkmToIndex.get(pkm) ?? 0) / NUM_PKM_SPECIES
+}
+
+// ─── Synergy-index lookup ────────────────────────────────────────────
+
+const SynergyToIndex = new Map<string, number>()
+SynergyArray.forEach((syn, i) => SynergyToIndex.set(syn, i))
+
+export function getSynergyIndex(synergy: Synergy): number {
+  return ((SynergyToIndex.get(synergy) ?? 0) + 1) / NUM_SYNERGIES
+}
