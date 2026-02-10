@@ -73,19 +73,21 @@ class TrainingMetricsCallback(BaseCallback):
                 self.episode_rewards.append(info["episode"]["r"])
                 self.episode_lengths.append(info["episode"]["l"])
                 self._total_episodes += 1
-            if "rank" in info:
-                self.episode_ranks.append(info["rank"])
-            if "stage" in info:
-                self.episode_stages.append(info["stage"])
-            # Terminal step metrics (logged when done=True)
-            if "gold" in info:
-                self.episode_gold.append(info["gold"])
-            if "boardSize" in info:
-                self.episode_board_size.append(info["boardSize"])
-            if "synergyCount" in info:
-                self.episode_synergy_count.append(info["synergyCount"])
-            if "itemsHeld" in info:
-                self.episode_items_held.append(info["itemsHeld"])
+
+                # Terminal step metrics — only logged at episode end
+                # so they reflect final game state, not intermediate steps
+                if "rank" in info:
+                    self.episode_ranks.append(info["rank"])
+                if "stage" in info:
+                    self.episode_stages.append(info["stage"])
+                if "gold" in info:
+                    self.episode_gold.append(info["gold"])
+                if "boardSize" in info:
+                    self.episode_board_size.append(info["boardSize"])
+                if "synergyCount" in info:
+                    self.episode_synergy_count.append(info["synergyCount"])
+                if "itemsHeld" in info:
+                    self.episode_items_held.append(info["itemsHeld"])
 
         # Log every 10 episodes
         if len(self.episode_rewards) >= 10:
