@@ -1415,8 +1415,12 @@ export class TrainingEnv {
       slots = [s("COMMON"),s("COMMON")]
     }
 
-    // Stage 28+: bots get 1 random crafted item per pokemon
-    const giveItems = stage >= 28
+    // Item ramp — number of bot pokemon that each get 1 random crafted item.
+    // Gradually introduces items so the agent learns to deal with equipped enemies.
+    //   Stage 8+:  1 unit gets an item
+    //   Stage 14+: 2 units get items
+    //   Stage 28+: all units get items
+    const itemSlots = stage >= 28 ? slots.length : stage >= 14 ? 2 : stage >= 8 ? 1 : 0
 
     this.state.players.forEach((player) => {
       if (!player.isBot || !player.alive) return
@@ -1427,12 +1431,18 @@ export class TrainingEnv {
         player.board.delete(key)
       })
 
+      // Pick which slots get items (random distinct indices)
+      const itemIndices = new Set<number>()
+      while (itemIndices.size < Math.min(itemSlots, slots.length)) {
+        itemIndices.add(Math.floor(Math.random() * slots.length))
+      }
+
       for (let t = 0; t < slots.length; t++) {
         const pkm = pickFromPool(slots[t])
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
-        if (giveItems) {
+        if (itemIndices.has(t)) {
           pokemon.items.add(pickRandomIn(CraftableItemsNoScarves))
         }
         player.board.set(pokemon.id, pokemon)
