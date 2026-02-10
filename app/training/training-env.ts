@@ -1494,11 +1494,33 @@ export class TrainingEnv {
         }
       }
 
+      // Place units using range-based positioning (same priority as real game):
+      //   Range 1 (melee):   front first  → rows [3, 2, 1]
+      //   Range 2 (ranged):  middle first  → rows [2, 1, 3]
+      //   Range 3+ (casters): back first   → rows [1, 2, 3]
+      const occupied = new Set<string>()
+      const placeUnit = (pokemon: Pokemon, range: number) => {
+        const rowOrder =
+          range >= 3 ? [1, 2, 3]
+          : range === 2 ? [2, 1, 3]
+          : [3, 2, 1]
+        for (const y of rowOrder) {
+          for (let x = 0; x < 8; x++) {
+            const key = `${x},${y}`
+            if (!occupied.has(key)) {
+              occupied.add(key)
+              pokemon.positionX = x
+              pokemon.positionY = y
+              return
+            }
+          }
+        }
+      }
+
       for (let t = 0; t < slots.length; t++) {
         const pkm = pickFromPool(slots[t], synergy)
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
-        pokemon.positionX = t % 8
-        pokemon.positionY = 1 + Math.floor(t / 8)
+        placeUnit(pokemon, getPokemonData(pkm).range)
         if (slots[t].item || extraItemIndices.has(t)) {
           pokemon.items.add(pickRandomIn(CraftableItemsNoScarves))
         }
