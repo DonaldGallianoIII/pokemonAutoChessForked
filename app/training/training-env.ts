@@ -106,6 +106,10 @@ export interface StepResult {
     money: number
     actionsThisTurn: number
     actionMask: number[]
+    gold: number
+    boardSize: number
+    synergyCount: number
+    itemsHeld: number
   }
 }
 
@@ -1612,6 +1616,15 @@ export class TrainingEnv {
   private getInfo(playerId?: string): StepResult["info"] {
     const targetId = playerId ?? this.agentId
     const agent = this.state.players.get(targetId)
+
+    // Count active synergies (entries with count > 0)
+    let synergyCount = 0
+    if (agent) {
+      agent.synergies.forEach((count) => {
+        if (count > 0) synergyCount++
+      })
+    }
+
     return {
       stage: this.state.stageLevel,
       phase:
@@ -1626,7 +1639,11 @@ export class TrainingEnv {
       actionsThisTurn: SELF_PLAY
         ? (this.actionsPerPlayer.get(targetId) ?? 0)
         : this.actionsThisTurn,
-      actionMask: this.getActionMask(targetId)
+      actionMask: this.getActionMask(targetId),
+      gold: agent?.money ?? 0,
+      boardSize: agent?.boardSize ?? 0,
+      synergyCount,
+      itemsHeld: agent?.items.length ?? 0
     }
   }
 
