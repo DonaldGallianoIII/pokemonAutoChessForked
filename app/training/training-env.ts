@@ -40,7 +40,7 @@ import {
   ItemComponentsNoFossilOrScarf,
   ItemComponentsNoScarf
 } from "../types/enum/Item"
-import { Pkm, PkmDuos, PkmIndex } from "../types/enum/Pokemon"
+import { Pkm, PkmDuo, PkmDuos, PkmIndex, PkmProposition } from "../types/enum/Pokemon"
 import { SpecialGameRule } from "../types/enum/SpecialGameRule"
 import { Synergy, SynergyArray } from "../types/enum/Synergy"
 import { Weather } from "../types/enum/Weather"
@@ -109,9 +109,17 @@ export class TrainingEnv {
   async initialize() {
     // Pre-fetch bots from DB so we don't need to query every reset
     if (this.cachedBots.length === 0) {
-      const bots = await BotV2.find({ approved: true }).lean()
-      if (bots.length > 0) {
-        this.cachedBots = bots as IBot[]
+      try {
+        const mongoose = await import("mongoose")
+        if (mongoose.connection.readyState === 1) {
+          const bots = await BotV2.find({ approved: true }).lean()
+          if (bots.length > 0) {
+            this.cachedBots = bots as IBot[]
+          }
+        }
+      } catch (err) {
+        // MongoDB not available - training will use empty bot pool
+        this.cachedBots = []
       }
     }
   }
@@ -360,13 +368,13 @@ export class TrainingEnv {
     if (player.pokemonsProposition.length === 0) return false
     if (propositionIndex >= player.pokemonsProposition.length) return false
 
-    const pkm = player.pokemonsProposition[propositionIndex] as Pkm
+    const pkm = player.pokemonsProposition[propositionIndex] as PkmProposition
     if (!pkm) return false
 
     // Handle duos (e.g., Latios/Latias)
     const pokemonsObtained: Pokemon[] = (
-      pkm in PkmDuos ? PkmDuos[pkm as keyof typeof PkmDuos] : [pkm]
-    ).map((p) => PokemonFactory.createPokemonFromName(p as Pkm, player))
+      pkm in PkmDuos ? PkmDuos[pkm as PkmDuo] : [pkm as Pkm]
+    ).map((p) => PokemonFactory.createPokemonFromName(p, player))
 
     const pokemon = pokemonsObtained[0]
     const isEvolution =
@@ -561,6 +569,11 @@ export class TrainingEnv {
     this.state.phase = GamePhaseState.FIGHT
     this.state.time = FIGHTING_PHASE_DURATION
     this.state.simulations.clear()
+
+    // Update dummy bot teams before combat
+    if (this.cachedBots.length === 0) {
+      this.updateDummyBotTeams()
+    }
 
     // Register played pokemons
     this.state.players.forEach((player) => {
@@ -932,25 +945,105 @@ export class TrainingEnv {
    * Bots use the existing BotV2 system with pre-scripted team progressions.
    */
   private createBotPlayers(): void {
-    const numBots = Math.min(TRAINING_NUM_OPPONENTS, this.cachedBots.length)
-    const selectedBots = shuffleArray([...this.cachedBots]).slice(0, numBots)
+    if (this.cachedBots.length > 0) {
+      const numBots = Math.min(TRAINING_NUM_OPPONENTS, this.cachedBots.length)
+      const selectedBots = shuffleArray([...this.cachedBots]).slice(0, numBots)
 
-    selectedBots.forEach((bot, i) => {
+      selectedBots.forEach((bot) => {
+        const botPlayer = new Player(
+          bot.id,
+          bot.name,
+          bot.elo,
+          0,
+          bot.avatar,
+          true, // isBot
+          this.state.players.size + 1,
+          new Map(),
+          "",
+          Role.BOT,
+          this.state
+        )
+        this.state.players.set(bot.id, botPlayer)
+        this.state.botManager.addBot(botPlayer)
+      })
+    } else {
+      // No bots from DB — create dummy opponents with random starter teams
+      this.createDummyBotPlayers()
+    }
+  }
+
+  /**
+   * Create simple dummy bot players when no MongoDB bots are available.
+   * Each bot gets a random common pokemon placed on their board so that
+   * combat simulations can run. Bots "level up" by getting additional
+   * random pokemon as stages progress (handled in advanceToNextPickPhase).
+   */
+  private createDummyBotPlayers(): void {
+    const commonPool = PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
+    for (let i = 0; i < TRAINING_NUM_OPPONENTS; i++) {
+      const botId = `dummy-bot-${i}`
       const botPlayer = new Player(
-        bot.id,
-        bot.name,
-        bot.elo,
+        botId,
+        `Bot-${i + 1}`,
+        1000,
         0,
-        bot.avatar,
-        true, // isBot
+        getAvatarString(PkmIndex[Pkm.MAGIKARP], false),
+        true,
         this.state.players.size + 1,
         new Map(),
         "",
         Role.BOT,
         this.state
       )
-      this.state.players.set(bot.id, botPlayer)
-      this.state.botManager.addBot(botPlayer)
+      this.state.players.set(botId, botPlayer)
+
+      // Give the bot a starter pokemon on the board
+      const starterPkm = pickRandomIn(commonPool)
+      const pokemon = PokemonFactory.createPokemonFromName(starterPkm, botPlayer)
+      pokemon.positionX = 3
+      pokemon.positionY = 1
+      botPlayer.board.set(pokemon.id, pokemon)
+      botPlayer.boardSize = 1
+    }
+  }
+
+  /**
+   * Update dummy bot teams to scale with the current stage level.
+   * Bots get more pokemon as the game progresses (roughly matching
+   * the expected team size at each stage).
+   */
+  private updateDummyBotTeams(): void {
+    const stage = this.state.stageLevel
+    // Target team size scales with stage: 1 at stage 1, up to ~6 by stage 30+
+    const targetSize = Math.min(6, Math.max(1, Math.ceil(stage / 5)))
+
+    // Pick rarity pool based on stage
+    const pool =
+      stage >= 20
+        ? PRECOMPUTED_POKEMONS_PER_RARITY.EPIC
+        : stage >= 10
+          ? PRECOMPUTED_POKEMONS_PER_RARITY.RARE
+          : stage >= 5
+            ? PRECOMPUTED_POKEMONS_PER_RARITY.UNCOMMON
+            : PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
+
+    this.state.players.forEach((player) => {
+      if (!player.isBot || !player.alive) return
+      if (!player.id.startsWith("dummy-bot-")) return
+
+      // Clear existing board and rebuild
+      player.board.forEach((_pokemon, key) => {
+        player.board.delete(key)
+      })
+
+      for (let t = 0; t < targetSize; t++) {
+        const pkm = pickRandomIn(pool)
+        const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
+        pokemon.positionX = t % 8
+        pokemon.positionY = 1 + Math.floor(t / 8)
+        player.board.set(pokemon.id, pokemon)
+      }
+      player.boardSize = targetSize
     })
   }
 
@@ -1128,17 +1221,18 @@ export class TrainingEnv {
     if (agent.pokemonsProposition.length > 0) {
       const freeSpace = getFreeSpaceOnBench(agent.board)
       for (let i = 0; i < agent.pokemonsProposition.length; i++) {
-        const pkm = agent.pokemonsProposition[i] as Pkm
+        const pkm = agent.pokemonsProposition[i] as PkmProposition
         if (!pkm) continue
         // Check if agent has bench space (or if it could evolve)
-        const pokemon = PokemonFactory.createPokemonFromName(pkm, agent)
+        const firstPkm = pkm in PkmDuos ? PkmDuos[pkm as PkmDuo][0] : (pkm as Pkm)
+        const pokemon = PokemonFactory.createPokemonFromName(firstPkm, agent)
         const isEvolution =
           pokemon.evolutionRule &&
           pokemon.evolutionRule instanceof CountEvolutionRule &&
           pokemon.evolutionRule.canEvolveIfGettingOne(pokemon, agent)
         const numNeeded =
           pkm in PkmDuos
-            ? PkmDuos[pkm as keyof typeof PkmDuos].length
+            ? PkmDuos[pkm as PkmDuo].length
             : 1
         if (freeSpace >= numNeeded || isEvolution) {
           mask[TrainingAction.PICK_PROPOSITION_0 + i] = 1

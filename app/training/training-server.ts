@@ -13,7 +13,7 @@
  *   GET  /health          -> { status: "ok" }
  */
 import express from "express"
-import { TrainingEnv } from "./training-env"
+import { TrainingEnv, StepResult } from "./training-env"
 import { TOTAL_ACTIONS, TOTAL_OBS_SIZE, TRAINING_API_PORT } from "./training-config"
 import { logger } from "../utils/logger"
 
@@ -99,7 +99,7 @@ export async function startTrainingServer() {
         return
       }
 
-      const results = []
+      const results: StepResult[] = []
       for (const action of actions) {
         const result = env.step(action)
         results.push(result)

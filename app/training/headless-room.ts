@@ -8,7 +8,8 @@ import { CountEvolutionRule, ItemEvolutionRule } from "../core/evolution-rules"
 import Player from "../models/colyseus-models/player"
 import { Pokemon } from "../models/colyseus-models/pokemon"
 import GameState from "../rooms/states/game-state"
-import { IPokemonEntity, Passive } from "../types"
+import { IPokemonEntity } from "../types"
+import { Passive } from "../types/enum/Passive"
 
 export class HeadlessRoom {
   state: GameState
