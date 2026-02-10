@@ -128,6 +128,7 @@ export class TrainingEnv {
   lastBattleResult: BattleResult | null = null
   prevActiveSynergyCount = 0
   cachedBots: IBot[] = []
+  botSynergies = new Map<string, Synergy>() // each dummy bot's team synergy theme
   additionalUncommonPool: Pkm[] = []
   additionalRarePool: Pkm[] = []
   additionalEpicPool: Pkm[] = []
@@ -1348,6 +1349,9 @@ export class TrainingEnv {
       )
       this.state.players.set(botId, botPlayer)
 
+      // Assign a synergy theme for this bot's team (persists all game)
+      this.botSynergies.set(botId, pickRandomIn(SynergyArray))
+
       // Give the bot a starter pokemon on the board
       const starterPkm = pickRandomIn(commonPool)
       const pokemon = PokemonFactory.createPokemonFromName(starterPkm, botPlayer)
@@ -1362,6 +1366,11 @@ export class TrainingEnv {
    * Update dummy bot teams to scale with the current stage level.
    * Team sizes and rarity pools mirror real player leveling curves
    * so the agent experiences proper late-game pressure.
+   *
+   * Each bot is assigned a synergy theme at creation (e.g. WATER, DARK, WILD).
+   * All slots prefer pokemon matching that synergy, so bots trigger real
+   * synergy bonuses in combat. Falls back to unthemed picks when a
+   * rarity+star+synergy combo has no candidates.
    */
   private updateDummyBotTeams(): void {
     const stage = this.state.stageLevel
@@ -1370,13 +1379,26 @@ export class TrainingEnv {
     // Each slot defines a rarity, target star level, and whether it gets a guaranteed item.
     type Slot = { rarity: keyof typeof R; stars: number; item?: boolean }
 
-    // Helper: pick a random pokemon from a rarity pool at the target star level.
-    // Falls back to <= stars, then unfiltered pool (safety net for pools
-    // where the target star level may not exist, e.g. UNIQUE/LEGENDARY).
-    const pickFromPool = (slot: Slot): Pkm => {
+    // Helper: pick a random pokemon from a rarity pool at the target star level,
+    // filtered to the bot's assigned synergy theme. Fallback chain:
+    //   1. exact stars + synergy match
+    //   2. exact stars (no synergy filter)
+    //   3. <= stars + synergy match
+    //   4. <= stars (no synergy filter)
+    //   5. unfiltered pool (safety net)
+    const pickFromPool = (slot: Slot, synergy: Synergy): Pkm => {
       const pool = R[slot.rarity]
+      const hasSynergy = (p: Pkm) => getPokemonData(p).types.includes(synergy)
+
+      const exactSyn = pool.filter((p) => getPokemonData(p).stars === slot.stars && hasSynergy(p))
+      if (exactSyn.length > 0) return pickRandomIn(exactSyn)
+
       const exact = pool.filter((p) => getPokemonData(p).stars === slot.stars)
       if (exact.length > 0) return pickRandomIn(exact)
+
+      const fallbackSyn = pool.filter((p) => getPokemonData(p).stars <= slot.stars && hasSynergy(p))
+      if (fallbackSyn.length > 0) return pickRandomIn(fallbackSyn)
+
       const fallback = pool.filter((p) => getPokemonData(p).stars <= slot.stars)
       return pickRandomIn(fallback.length > 0 ? fallback : pool)
     }
@@ -1453,6 +1475,9 @@ export class TrainingEnv {
       if (!player.isBot || !player.alive) return
       if (!player.id.startsWith("dummy-bot-")) return
 
+      // Each bot commits to a synergy theme (assigned at creation, persists all game)
+      const synergy = this.botSynergies.get(player.id) ?? pickRandomIn(SynergyArray)
+
       // Clear existing board and rebuild
       player.board.forEach((_pokemon, key) => {
         player.board.delete(key)
@@ -1470,7 +1495,7 @@ export class TrainingEnv {
       }
 
       for (let t = 0; t < slots.length; t++) {
-        const pkm = pickFromPool(slots[t])
+        const pkm = pickFromPool(slots[t], synergy)
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
