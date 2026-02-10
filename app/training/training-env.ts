@@ -1367,6 +1367,21 @@ export class TrainingEnv {
     const stage = this.state.stageLevel
     const R = PRECOMPUTED_POKEMONS_PER_RARITY
 
+    // Evolution star gate by stage — prevents bots from randomly rolling
+    // fully-evolved 3-star units in the early game. Can be tightened later.
+    //   Stages 1-13:  base forms only (stars === 1)
+    //   Stages 14-24: up to 2-star evolutions
+    //   Stages 25+:   any star level (fully evolved allowed)
+    const maxStars = stage >= 25 ? 3 : stage >= 14 ? 2 : 1
+
+    // Helper: pick a random pokemon from a rarity pool respecting the star gate.
+    // Falls back to unfiltered pool if no candidates pass the filter (safety net).
+    const pickFromPool = (rarity: keyof typeof R): Pkm => {
+      const pool = R[rarity]
+      const filtered = pool.filter((p) => getPokemonData(p).stars <= maxStars)
+      return pickRandomIn(filtered.length > 0 ? filtered : pool)
+    }
+
     // Per-slot rarity composition by stage bracket.
     // Each entry picks one random pokemon from that rarity pool.
     type Slot = keyof typeof R
@@ -1410,7 +1425,7 @@ export class TrainingEnv {
       })
 
       for (let t = 0; t < slots.length; t++) {
-        const pkm = pickRandomIn(R[slots[t]])
+        const pkm = pickFromPool(slots[t])
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
