@@ -35,11 +35,12 @@ class PokemonAutoChessEnv(gym.Env):
         super().__init__()
         self.server_url = server_url.rstrip("/")
         self.use_action_mask = use_action_mask
+        self.session = requests.Session()
 
         # Query server for space dimensions
         try:
-            action_info = requests.get(f"{self.server_url}/action-space").json()
-            obs_info = requests.get(f"{self.server_url}/observation-space").json()
+            action_info = self.session.get(f"{self.server_url}/action-space").json()
+            obs_info = self.session.get(f"{self.server_url}/observation-space").json()
         except requests.exceptions.ConnectionError:
             raise ConnectionError(
                 f"Could not connect to training server at {self.server_url}. "
@@ -58,7 +59,7 @@ class PokemonAutoChessEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        response = requests.post(f"{self.server_url}/reset").json()
+        response = self.session.post(f"{self.server_url}/reset").json()
         obs = np.array(response["observation"], dtype=np.float32)
         info = response.get("info", {})
         self._current_action_mask = np.array(
@@ -72,7 +73,7 @@ class PokemonAutoChessEnv(gym.Env):
 
     def step(self, action):
         action = int(action)
-        response = requests.post(
+        response = self.session.post(
             f"{self.server_url}/step",
             json={"action": action}
         ).json()
@@ -96,4 +97,4 @@ class PokemonAutoChessEnv(gym.Env):
         return self._current_action_mask
 
     def close(self):
-        pass
+        self.session.close()
