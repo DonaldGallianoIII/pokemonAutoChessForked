@@ -1,6 +1,10 @@
 """
 PPO Training Script for Pokemon Auto Chess
 
+NOTE: Local copy on Windows has diverged from this repo version.
+      Before pushing updates, sync local changes back here first.
+      Key local changes: hyperparameter tuning, reward shaping tweaks.
+
 Trains a MaskablePPO agent using sb3-contrib with native action masking.
 The environment exposes 92 discrete actions and 612 observation features,
 aligned 1:1 with the agent-io browser extension API.
