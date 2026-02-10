@@ -1368,12 +1368,12 @@ export class TrainingEnv {
 
     // Team size matches real player leveling curve
     const targetSize =
-      stage >= 24 ? 9
-      : stage >= 20 ? 8
-      : stage >= 17 ? 7
-      : stage >= 12 ? 6
+      stage >= 28 ? 9
+      : stage >= 25 ? 8
+      : stage >= 18 ? 7
+      : stage >= 14 ? 6
       : stage >= 10 ? 5
-      : stage >= 7 ? 4
+      : stage >= 8 ? 4
       : stage >= 5 ? 3
       : 2
 
