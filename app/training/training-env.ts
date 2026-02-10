@@ -1368,7 +1368,7 @@ export class TrainingEnv {
 
     // Team size matches real player leveling curve
     const targetSize =
-      stage >= 22 ? 9
+      stage >= 24 ? 9
       : stage >= 20 ? 8
       : stage >= 17 ? 7
       : stage >= 12 ? 6
@@ -1389,8 +1389,8 @@ export class TrainingEnv {
               ? PRECOMPUTED_POKEMONS_PER_RARITY.UNCOMMON
               : PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
 
-    // Stage 24+: bots get 1 random crafted item per pokemon
-    const giveItems = stage >= 24
+    // Stage 28+: bots get 1 random crafted item per pokemon
+    const giveItems = stage >= 28
 
     this.state.players.forEach((player) => {
       if (!player.isBot || !player.alive) return
