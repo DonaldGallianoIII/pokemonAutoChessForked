@@ -1407,62 +1407,48 @@ export class TrainingEnv {
     const s = (rarity: keyof typeof R, stars = 1, item = false): Slot => ({ rarity, stars, item })
 
     // Per-slot composition by stage bracket.
-    // UNIQUE persists from stage 11+, LEGENDARY from stage 21+.
+    // UNIQUE introduced at stage 15, LEGENDARY at stage 23.
     // Items marked with `true` are guaranteed on that slot.
     // Additional random items go on non-guaranteed slots.
     let slots: Slot[]
     let extraItems = 0 // additional items on random non-guaranteed slots
 
-    if (stage >= 28) {
-      // 9 units: ALL get 1 item
+    if (stage >= 27) {
+      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 extra items
       slots = [
         s("UNIQUE",3,true), s("LEGENDARY",3,true),
-        s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true),
-        s("ULTRA",2,true), s("ULTRA",2,true)
-      ]
-    } else if (stage >= 25) {
-      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 random items on others
-      slots = [
-        s("UNIQUE",3,true), s("LEGENDARY",3,true),
-        s("RARE",3), s("RARE",3), s("EPIC",2), s("EPIC",2), s("ULTRA",2), s("ULTRA",1)
+        s("EPIC",2), s("EPIC",2), s("EPIC",1), s("EPIC",1),
+        s("ULTRA",1), s("ULTRA",1)
       ]
       extraItems = 2
-    } else if (stage >= 21) {
-      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 random items on others
+    } else if (stage >= 23) {
+      // 7 units: UNIQUE(item) + LEGENDARY(item) + 1 extra item
       slots = [
         s("UNIQUE",3,true), s("LEGENDARY",3,true),
-        s("RARE",2), s("RARE",2), s("EPIC",2), s("EPIC",1), s("EPIC",1), s("ULTRA",1)
+        s("RARE",2), s("RARE",2), s("EPIC",1), s("EPIC",1), s("ULTRA",1)
       ]
-      extraItems = 2
-    } else if (stage >= 18) {
-      // 7 units: UNIQUE(item) + 2 random items on others
+      extraItems = 1
+    } else if (stage >= 19) {
+      // 6 units: UNIQUE(item) + 1 extra item
       slots = [
         s("UNIQUE",3,true),
-        s("RARE",2), s("RARE",2), s("RARE",2), s("RARE",2), s("EPIC",1), s("EPIC",1)
+        s("RARE",2), s("RARE",1), s("RARE",1), s("EPIC",1), s("EPIC",1)
       ]
-      extraItems = 2
-    } else if (stage >= 14) {
-      // 7 units: UNIQUE(item) + 2 random items on others
+      extraItems = 1
+    } else if (stage >= 15) {
+      // 5 units: UNIQUE(item) introduced + 1 extra item
       slots = [
         s("UNIQUE",3,true),
-        s("UNCOMMON",2), s("UNCOMMON",1), s("RARE",2), s("RARE",1), s("RARE",1), s("EPIC",1)
+        s("COMMON",2), s("COMMON",2), s("UNCOMMON",1), s("RARE",1)
       ]
-      extraItems = 2
+      extraItems = 1
     } else if (stage >= 11) {
-      // 6 units: UNIQUE(item) + 1 random item on other
-      slots = [
-        s("UNIQUE",3,true),
-        s("COMMON",2), s("COMMON",2), s("UNCOMMON",1), s("RARE",1), s("RARE",1)
-      ]
-      extraItems = 1
-    } else if (stage >= 10) {
-      // 5 units: 1 item on random unit
-      slots = [s("COMMON",2), s("COMMON",2), s("COMMON",1), s("UNCOMMON",1), s("RARE",1)]
-      extraItems = 1
-    } else if (stage >= 8) {
       // 4 units: 1 item on random unit
       slots = [s("COMMON",2), s("COMMON",1), s("UNCOMMON",1), s("RARE",1)]
       extraItems = 1
+    } else if (stage >= 8) {
+      // 3 units: no items
+      slots = [s("COMMON",2), s("COMMON",1), s("UNCOMMON",1)]
     } else if (stage >= 5) {
       // 3 units: no items
       slots = [s("COMMON",1), s("COMMON",1), s("UNCOMMON",1)]
