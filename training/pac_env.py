@@ -65,7 +65,9 @@ class PokemonAutoChessEnv(gym.Env):
             info.get("actionMask", np.ones(self.num_actions)),
             dtype=np.int8
         )
-        info["action_mask"] = self._current_action_mask
+        # sb3-contrib MaskablePPO reads masks via env.action_masks() method.
+        # Also inject into info with both key names for compatibility.
+        info["action_masks"] = self._current_action_mask
         return obs, info
 
     def step(self, action):
@@ -85,7 +87,7 @@ class PokemonAutoChessEnv(gym.Env):
             info.get("actionMask", np.ones(self.num_actions)),
             dtype=np.int8
         )
-        info["action_mask"] = self._current_action_mask
+        info["action_masks"] = self._current_action_mask
 
         return obs, reward, terminated, truncated, info
 

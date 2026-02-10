@@ -14,7 +14,7 @@
  */
 import express from "express"
 import { TrainingEnv, StepResult } from "./training-env"
-import { TOTAL_ACTIONS, TOTAL_OBS_SIZE, TRAINING_API_PORT } from "./training-config"
+import { SELF_PLAY, TOTAL_ACTIONS, TOTAL_OBS_SIZE, TRAINING_API_PORT } from "./training-config"
 import { logger } from "../utils/logger"
 
 export async function startTrainingServer() {
@@ -112,6 +112,51 @@ export async function startTrainingServer() {
     }
   })
 
+  // Self-play batch step: process one action per player (8 actions in, 8 results out)
+  // Used by SelfPlayVecEnv when SELF_PLAY=true
+  app.post("/step-multi", (req, res) => {
+    try {
+      if (!SELF_PLAY) {
+        res.status(400).json({
+          error: "step-multi is only available in SELF_PLAY mode. Set SELF_PLAY=true"
+        })
+        return
+      }
+      if (!isInitialized) {
+        res.status(400).json({ error: "Environment not initialized. Call /reset first." })
+        return
+      }
+      const actions: number[] = req.body.actions
+      if (!Array.isArray(actions) || actions.length !== 8) {
+        res.status(400).json({
+          error: "Expected { actions: number[8] } — one action per player"
+        })
+        return
+      }
+      for (const action of actions) {
+        if (action < 0 || action >= TOTAL_ACTIONS) {
+          res.status(400).json({
+            error: `Invalid action: ${action}. Must be 0-${TOTAL_ACTIONS - 1}`
+          })
+          return
+        }
+      }
+
+      const results = env.stepBatch(actions)
+
+      // Return parallel arrays for efficient numpy conversion on the Python side
+      res.json({
+        observations: results.map((r) => r.observation),
+        rewards: results.map((r) => r.reward),
+        dones: results.map((r) => r.done),
+        infos: results.map((r) => r.info)
+      })
+    } catch (error: any) {
+      logger.error("Step-multi error:", error)
+      res.status(500).json({ error: error.message })
+    }
+  })
+
   // Run full game with random actions (for benchmarking)
   app.post("/benchmark", (_req, res) => {
     try {
@@ -149,8 +194,12 @@ export async function startTrainingServer() {
 
   app.listen(TRAINING_API_PORT, () => {
     logger.info(`Training server listening on port ${TRAINING_API_PORT}`)
+    logger.info(`  Mode: ${SELF_PLAY ? "SELF_PLAY (8 RL agents)" : "SINGLE_AGENT (1 RL + 7 bots)"}`)
     logger.info(`  POST /reset          - Reset environment`)
     logger.info(`  POST /step           - Take action { action: 0-${TOTAL_ACTIONS - 1} }`)
+    if (SELF_PLAY) {
+      logger.info(`  POST /step-multi     - Batch step { actions: number[8] }`)
+    }
     logger.info(`  GET  /observe        - Get current observation`)
     logger.info(`  POST /benchmark      - Run full game with random actions`)
     logger.info(`  GET  /health         - Health check`)
