@@ -3,6 +3,7 @@
 **Status:** Approved plan — ready for implementation
 **Scope:** Expand the headless PPO training environment to match the 92-action, rich-observation agent-io API
 **Audited by:** Cassy (Claude Opus) — all audit findings incorporated
+**Implementation notes audit:** All 4 minor items verified (see Implementation Notes appendix)
 
 ---
 
@@ -504,18 +505,20 @@ export const OBS_BOARD_FEATURES_PER_SLOT = 12
 | 2 | speciesIndex | getPkmSpeciesIndex(name) | Unique pokemon identity |
 | 3 | stars | / 3 | Evolution stage |
 | 4 | rarity | 0-1 map | |
-| 5 | type1 | getSynergyIndex | Includes stone-added types |
+| 5 | type1 | getSynergyIndex | Base types only (see impl note) |
 | 6 | type2 | getSynergyIndex | |
 | 7 | type3 | getSynergyIndex | |
-| 8 | type4 | getSynergyIndex | 4th type (stone item or 0) |
+| 8 | type4 | 0 | Always 0 during PICK phase (see impl note) |
 | 9 | atk | / 50 | |
 | 10 | hp | / 500 | Current max HP |
 | 11 | range | / 4 | |
 | 12 | numItems | / 3 | Items equipped on this unit |
 
-**Reading types from board units:** Use `values(pokemon.types)` which includes both base types AND stone-added types. Encode first 4, pad with 0.
+**Reading types from board units:** Use `values(pokemon.types)` to read the SetSchema. During PICK phase, this contains **base types only** (up to 3). Stone-added synergies are only applied to `PokemonEntity` during combat simulation, not to `Pokemon` instances on the board during shop phase. The 4th type slot will be 0 during observations. The agent can infer stone synergy potential from the held items observation (Phase 3.4).
 
-**Acceptance:** Board observation is exactly 384 floats. Row y=4 no longer encoded. Board unit with a Fire Stone shows FIRE in its type slots.
+> **Implementation note (verified):** `PokemonEntity.addItem()` mutates `types` directly but requires `this.simulation` to exist. `Pokemon` instances on `player.board` during PICK have no simulation. Items are stored in `player.items` (inventory), not equipped to board pokemon. Type encoding is base-types-only during PICK, which is correct and sufficient.
+
+**Acceptance:** Board observation is exactly 384 floats. Row y=4 no longer encoded. Type slots encode base types (up to 3). 4th slot is 0 during PICK phase.
 
 ---
 
@@ -714,12 +717,14 @@ No code changes needed — just verification.
 
 After PVE battles where the agent wins, the game awards item rewards.
 
-**In `runFightPhase()`**, after PVE simulation completes and agent's battle result is WIN:
+**In `runFightPhase()`**, after PVE simulation completes and agent's battle result is WIN, but BEFORE returning from `runFightPhase()`:
 1. Generate 3 random items from `ItemComponentsNoFossilOrScarf` (or appropriate pool)
-2. Set `agent.itemsProposition` with these items
+2. Push items to `agent.itemsProposition`
 3. The next pick phase will present them for PICK actions
 
 **Mask handling:** Same as 4.1 — item-only propositions allow PICK_0..2.
+
+> **Implementation note (verified):** `assignShop()` does NOT touch `itemsProposition`. `advanceToNextPickPhase()` does NOT clear `itemsProposition` either. Items set in `runFightPhase()` will survive into the next pick phase. Additional pick stages (5, 8, 11) only `.push()` to `itemsProposition` without clearing, but these stages never overlap with PVE stages, so no collision. Order of operations: set propositions in `runFightPhase()` → `advanceToNextPickPhase()` runs → propositions persist → agent picks.
 
 **Acceptance:** After winning a PVE round, agent sees item propositions and picks one.
 
@@ -869,27 +874,47 @@ Helper `countActiveSynergyThresholds(player)`: iterate synergies, count how many
 export const REWARD_PER_ENEMY_KILL = 0.02
 ```
 
-**Implementation** (in `runFightPhase()`, after simulations finish):
+**Implementation** (in `runFightPhase()`):
 
-After getting the agent's simulation result, count how many enemy units the agent's team killed:
+> **Implementation note (verified):** Dead units are REMOVED from the MapSchema entirely during combat — `unit.life <= 0` won't work because dead units are gone. After `simulation.stop()`, teams are CLEARED completely. Must capture initial team sizes BEFORE fight, then count survivors AFTER `onFinish()` but BEFORE `stop()`.
+
+**Step 1:** Before running simulations, record initial enemy team sizes per simulation:
 
 ```ts
+// Before the simulation loop
+const initialEnemySizes = new Map<string, number>()
+this.state.simulations.forEach((sim, id) => {
+  const agentIsBlue = agent.team === Team.BLUE_TEAM
+  const enemyTeam = agentIsBlue ? sim.redTeam : sim.blueTeam
+  initialEnemySizes.set(id, enemyTeam.size)
+})
+```
+
+**Step 2:** After `onFinish()` for the agent's simulation, but BEFORE `stop()`:
+
+```ts
+// After onFinish, before stop
 const agentSim = this.state.simulations.get(agent.simulationId)
 if (agentSim) {
-  const enemyTeam = agent.team === Team.BLUE_TEAM
-    ? agentSim.redTeam
-    : agentSim.blueTeam
-  let enemyDeaths = 0
-  enemyTeam.forEach(unit => {
-    if (unit.life <= 0) enemyDeaths++
-  })
+  const agentIsBlue = agent.team === Team.BLUE_TEAM
+  const enemyTeam = agentIsBlue ? agentSim.redTeam : agentSim.blueTeam
+  const initialSize = initialEnemySizes.get(agent.simulationId) ?? 0
+  const survivingEnemies = enemyTeam.size
+  const enemyDeaths = initialSize - survivingEnemies
   reward += enemyDeaths * REWARD_PER_ENEMY_KILL
 }
+
+// THEN call stop() which clears teams
+this.state.simulations.forEach((simulation) => {
+  simulation.stop()
+})
 ```
+
+**Important:** The current code calls `onFinish()` and `stop()` in a single loop. Refactor to: (1) run sims to completion, (2) call `onFinish()` on all, (3) extract reward data, (4) THEN call `stop()` on all.
 
 This provides immediate board-quality signal even on losses. "Lost but killed 5 of 6" is much better signal than just "lost".
 
-**Acceptance:** Agent that kills 4 enemy units in a loss gets: -0.3 (loss) + 0.08 (kills) = -0.22. Better than a 0-kill loss (-0.30).
+**Acceptance:** Agent that kills 4 of 6 enemy units in a loss gets: -0.3 (loss) + 0.08 (kills) = -0.22. Better than a 0-kill loss (-0.30).
 
 ---
 
@@ -1070,3 +1095,45 @@ Phase 2 + Phase 3 done
 **Total: 33 chunks** (5 more than original 28, due to audit additions)
 
 Each chunk is ~30-60 minutes of focused implementation work.
+
+---
+
+## Appendix: Implementation Notes (Verified)
+
+These items were flagged as "verify during implementation" and have been verified against the source code.
+
+### A. Board type reading during PICK phase (affects Phase 3.3)
+
+**Verified in:** `app/core/pokemon-entity.ts:788-816`, `app/models/colyseus-models/pokemon.ts:66`
+
+During PICK phase, board pokemon are `Pokemon` instances (not `PokemonEntity`). Items live in `player.items` (inventory), not equipped to individual pokemon. Stone synergies are only added by `PokemonEntity.addItem()` which runs during combat simulation and requires `this.simulation` to exist.
+
+**Consequence:** `pokemon.types` during PICK phase contains **base types only** (max 3). The 4th type slot in observations will always be 0. This is correct — the agent infers stone synergy potential from the held items observation (Phase 3.4).
+
+### B. Move heuristic and fresh mask per step (affects Phase 2.4)
+
+**Verified in:** `app/training/training-env.ts:201-291`
+
+`getActionMask()` is called via `getInfo()` which is called at the end of every `step()`. The mask is always fresh after each action. When the agent calls MOVE repeatedly, each subsequent mask reflects the updated cell occupancy. No caching issue.
+
+### C. Enemy kill counting uses team size delta, not HP check (affects Phase 6.3)
+
+**Verified in:** `app/core/simulation.ts:1416, 1511`
+
+Dead units are **removed from the MapSchema entirely** during combat (the battle ends when `team.size === 0`). After `simulation.stop()`, teams are **cleared completely**. The correct approach:
+1. Record initial enemy team size before simulation loop
+2. After `onFinish()` but before `stop()`, read `enemyTeam.size` (surviving enemies)
+3. `deadEnemies = initialSize - survivingEnemies`
+4. Only then call `stop()`
+
+The existing `runFightPhase()` calls `onFinish()` and `stop()` in the same loop — must be refactored to separate them.
+
+### D. PVE reward proposition persistence (affects Phase 4.3)
+
+**Verified in:** `app/training/training-env.ts:780-861`, `app/rooms/game-room.ts:1753-1766`
+
+`assignShop()` does NOT touch `itemsProposition`. `advanceToNextPickPhase()` does NOT clear `itemsProposition`. Items pushed to `agent.itemsProposition` in `runFightPhase()` will survive into the next pick phase.
+
+Additional pick stages (5, 8, 11) only `.push()` without clearing, but these never overlap with PVE stages — no collision risk.
+
+The real game uses `resetArraySchema()` (destructive clear + replace) in `stopFightingPhase()`, but the training env doesn't need this because it handles PVE rewards inline.
