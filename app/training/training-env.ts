@@ -56,6 +56,7 @@ import { pickNRandomIn, pickRandomIn, shuffleArray } from "../utils/random"
 import { values } from "../utils/schemas"
 import { HeadlessRoom } from "./headless-room"
 import {
+  cellToXY,
   MAX_PROPOSITIONS,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
@@ -221,7 +222,7 @@ export class TrainingEnv {
     this.state.gameLoaded = true
     this.state.stageLevel = 0
 
-    // Stay at stage 0 with propositions — agent(s) pick via PICK_PROPOSITION action
+    // Stay at stage 0 with propositions — agent(s) pick via PICK action
     this.state.phase = GamePhaseState.PICK
     this.state.time =
       (StageDuration[this.state.stageLevel] ?? StageDuration.DEFAULT) * 1000
@@ -270,8 +271,8 @@ export class TrainingEnv {
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
         actionExecuted &&
-        action >= TrainingAction.PICK_PROPOSITION_0 &&
-        action <= TrainingAction.PICK_PROPOSITION_5
+        action >= TrainingAction.PICK_0 &&
+        action <= TrainingAction.PICK_0 + 5
       ) {
         // After picking, if still at stage 0, advance to stage 1
         if (this.state.stageLevel === 0) {
@@ -336,64 +337,46 @@ export class TrainingEnv {
   }
 
   private executeAction(action: number, agent: Player): boolean {
-    // If agent has propositions pending, only allow PICK_PROPOSITION actions
+    // If agent has propositions pending, only allow PICK actions
     if (agent.pokemonsProposition.length > 0) {
-      if (
-        action >= TrainingAction.PICK_PROPOSITION_0 &&
-        action <= TrainingAction.PICK_PROPOSITION_5
-      ) {
-        const propositionIndex =
-          action - TrainingAction.PICK_PROPOSITION_0
-        return this.pickProposition(agent, propositionIndex)
+      if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
+        return this.pickProposition(agent, action - TrainingAction.PICK_0)
       }
       return false // no other actions allowed during proposition phase
     }
 
-    switch (action) {
-      case TrainingAction.END_TURN:
-        return true
-
-      case TrainingAction.BUY_0:
-      case TrainingAction.BUY_1:
-      case TrainingAction.BUY_2:
-      case TrainingAction.BUY_3:
-      case TrainingAction.BUY_4: {
-        const shopIndex = action - TrainingAction.BUY_0
-        return this.buyPokemon(agent, shopIndex)
-      }
-
-      case TrainingAction.SELL_0:
-      case TrainingAction.SELL_1:
-      case TrainingAction.SELL_2:
-      case TrainingAction.SELL_3:
-      case TrainingAction.SELL_4:
-      case TrainingAction.SELL_5:
-      case TrainingAction.SELL_6:
-      case TrainingAction.SELL_7: {
-        const benchIndex = action - TrainingAction.SELL_0
-        return this.sellPokemonAtBench(agent, benchIndex)
-      }
-
-      case TrainingAction.REROLL:
-        return this.rerollShop(agent)
-
-      case TrainingAction.LEVEL_UP:
-        return this.levelUp(agent)
-
-      case TrainingAction.PICK_PROPOSITION_0:
-      case TrainingAction.PICK_PROPOSITION_1:
-      case TrainingAction.PICK_PROPOSITION_2:
-      case TrainingAction.PICK_PROPOSITION_3:
-      case TrainingAction.PICK_PROPOSITION_4:
-      case TrainingAction.PICK_PROPOSITION_5: {
-        const propositionIndex =
-          action - TrainingAction.PICK_PROPOSITION_0
-        return this.pickProposition(agent, propositionIndex)
-      }
-
-      default:
-        return false
+    // BUY_0..BUY_4 (0-4)
+    if (action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_0 + 4) {
+      return this.buyPokemon(agent, action - TrainingAction.BUY_0)
     }
+    // BUY_5 (5) — no-op until Phase 2.2 (6th shop slot)
+    if (action === TrainingAction.BUY_5) return false
+    // REFRESH (6)
+    if (action === TrainingAction.REFRESH) return this.rerollShop(agent)
+    // LEVEL_UP (7)
+    if (action === TrainingAction.LEVEL_UP) return this.levelUp(agent)
+    // LOCK_SHOP (8) — no-op until Phase 2.1
+    if (action === TrainingAction.LOCK_SHOP) return false
+    // END_TURN (9)
+    if (action === TrainingAction.END_TURN) return true
+    // MOVE_0..MOVE_31 (10-41) — no-op until Phase 2.4
+    if (action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31) return false
+    // SELL_0..SELL_31 (42-73): bench sells (y=0) work, board sells (y>0) are no-ops
+    if (action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31) {
+      const [x, y] = cellToXY(action - TrainingAction.SELL_0)
+      if (y === 0) return this.sellPokemonAtBench(agent, x)
+      return false // board cell sells — no-op until Phase 2.3
+    }
+    // REMOVE_SHOP_0..5 (74-79) — no-op until Phase 2.5
+    if (action >= TrainingAction.REMOVE_SHOP_0 && action <= TrainingAction.REMOVE_SHOP_0 + 5) return false
+    // PICK_0..PICK_5 (80-85)
+    if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
+      return this.pickProposition(agent, action - TrainingAction.PICK_0)
+    }
+    // COMBINE_0..5 (86-91) — no-op until Phase 2.6
+    if (action >= TrainingAction.COMBINE_0 && action <= TrainingAction.COMBINE_0 + 5) return false
+
+    return false
   }
 
   /**
@@ -848,7 +831,7 @@ export class TrainingEnv {
       PortalCarouselStages.includes(this.state.stageLevel) &&
       this.state.stageLevel > 0
     ) {
-      // Agent gets propositions to choose from via PICK_PROPOSITION actions
+      // Agent gets propositions to choose from via PICK actions
       this.state.players.forEach((player) => {
         if (!player.isBot) {
           this.state.shop.assignUniquePropositions(player, this.state, [])
@@ -926,18 +909,18 @@ export class TrainingEnv {
       }
     }
 
-    // Auto-pick for bots only; agent propositions stay pending for PICK_PROPOSITION actions
+    // Auto-pick for bots only; agent propositions stay pending for PICK actions
     this.autoPickPropositionsForBots()
   }
 
   /**
    * Auto-pick pokemon and item propositions for bot players only.
-   * The RL agent picks via PICK_PROPOSITION actions instead.
+   * The RL agent picks via PICK actions instead.
    * Bots pick randomly, creates the pokemon, places on bench, gives item.
    */
   private autoPickPropositionsForBots(): void {
     this.state.players.forEach((player) => {
-      // Skip RL agents — they pick via PICK_PROPOSITION actions.
+      // Skip RL agents — they pick via PICK actions.
       // In self-play mode all players are non-bot, so this is a no-op.
       if (!player.isBot) return
       if (player.pokemonsProposition.length > 0) {
@@ -1279,7 +1262,7 @@ export class TrainingEnv {
       return mask
     }
 
-    // If agent has propositions pending, only PICK_PROPOSITION actions are valid
+    // If agent has propositions pending, only PICK actions are valid
     if (agent.pokemonsProposition.length > 0) {
       const freeSpace = getFreeSpaceOnBench(agent.board)
       for (let i = 0; i < agent.pokemonsProposition.length; i++) {
@@ -1297,7 +1280,7 @@ export class TrainingEnv {
             ? PkmDuos[pkm as PkmDuo].length
             : 1
         if (freeSpace >= numNeeded || isEvolution) {
-          mask[TrainingAction.PICK_PROPOSITION_0 + i] = 1
+          mask[TrainingAction.PICK_0 + i] = 1
         }
       }
       // If no proposition is valid (bench full, no evolution), allow END_TURN as fallback
@@ -1311,7 +1294,7 @@ export class TrainingEnv {
     // END_TURN is always valid
     mask[TrainingAction.END_TURN] = 1
 
-    // BUY actions
+    // BUY actions (slots 0-4 only; BUY_5 stays masked until Phase 3.2)
     for (let i = 0; i < 5; i++) {
       const pkm = agent.shop[i]
       if (pkm && pkm !== Pkm.DEFAULT) {
@@ -1323,7 +1306,7 @@ export class TrainingEnv {
       }
     }
 
-    // SELL actions (bench positions 0-7)
+    // SELL actions (bench positions 0-7, mapped to grid cells 0-7 where y=0)
     for (let x = 0; x < 8; x++) {
       const pokemon = this.findPokemonAt(agent, x, 0)
       if (pokemon) {
@@ -1331,10 +1314,10 @@ export class TrainingEnv {
       }
     }
 
-    // REROLL
+    // REFRESH
     const rollCost = agent.shopFreeRolls > 0 ? 0 : 1
     if (agent.money >= rollCost) {
-      mask[TrainingAction.REROLL] = 1
+      mask[TrainingAction.REFRESH] = 1
     }
 
     // LEVEL_UP
@@ -1490,12 +1473,12 @@ export class TrainingEnv {
       // Handle proposition picking (stage 0 starters, uniques, additionals)
       if (player.pokemonsProposition.length > 0) {
         if (
-          action >= TrainingAction.PICK_PROPOSITION_0 &&
-          action <= TrainingAction.PICK_PROPOSITION_5
+          action >= TrainingAction.PICK_0 &&
+          action <= TrainingAction.PICK_0 + 5
         ) {
           this.pickProposition(
             player,
-            action - TrainingAction.PICK_PROPOSITION_0
+            action - TrainingAction.PICK_0
           )
           // Don't count proposition picks toward turn end — player continues shopping
           continue

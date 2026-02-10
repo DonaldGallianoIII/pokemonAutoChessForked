@@ -18,8 +18,8 @@ The agent learns to:
   - Sell underperforming units (resource recycling)
 
 Architecture:
-  The PPO policy uses a small MLP (64x64) which is appropriate for the
-  ~150-dimensional observation space and 16 discrete actions.
+  The PPO policy uses a small MLP (128x128) which is appropriate for the
+  observation space and 92 discrete actions (aligned with agent-io API).
 """
 
 import argparse
@@ -192,7 +192,7 @@ def train(
 
     # Checkpoint prefix encodes phase + action space for rollback clarity.
     # e.g. "phaseA_22act", "phaseB_22act", "phaseB_92act"
-    checkpoint_prefix = f"phase{phase}_22act"
+    checkpoint_prefix = f"phase{phase}_92act"
 
     # Wait for server
     wait_for_server(server_url)

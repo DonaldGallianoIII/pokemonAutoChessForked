@@ -42,45 +42,33 @@ export const TOTAL_OBS_SIZE =
   OBS_OPPONENT_STATS +
   OBS_PROPOSITION_SLOTS * OBS_PROPOSITION_FEATURES
 
-// Action space (22-action v1)
+// Action space (92-action layout, aligned with agent-io API)
 //
-// ACTION INDEX MAPPING — training env vs future agent-io extension:
-//
-// These indices are internal to the training env. They do NOT match the
-// planned 92-action agent-io extension layout (OPTION_B_MASTER_PLAN.md),
-// which uses: BUY 0-5, REFRESH 6, LEVEL 7, LOCK 8, END_TURN 9, MOVE 10-41,
-// SELL 42-73, REMOVE_SHOP 74-79, PICK 80-85, COMBINE_ITEMS 86-91.
-//
-// When bridging a trained model to the extension, you MUST translate indices.
-// After Phase 1 expansion to 92 actions, the training env should switch to
-// match the extension layout 1:1 to eliminate translation overhead.
+// These indices match the agent-io extension layout 1:1.
+// BUY 0-5, REFRESH 6, LEVEL_UP 7, LOCK_SHOP 8, END_TURN 9,
+// MOVE 10-41, SELL 42-73, REMOVE_SHOP 74-79, PICK 80-85, COMBINE 86-91.
 export enum TrainingAction {
-  END_TURN = 0, // End pick phase, advance to fight
-  BUY_0 = 1,
-  BUY_1 = 2,
-  BUY_2 = 3,
-  BUY_3 = 4,
-  BUY_4 = 5,
-  SELL_0 = 6, // Sell pokemon at bench position 0
-  SELL_1 = 7,
-  SELL_2 = 8,
-  SELL_3 = 9,
-  SELL_4 = 10,
-  SELL_5 = 11,
-  SELL_6 = 12,
-  SELL_7 = 13,
-  REROLL = 14,
-  LEVEL_UP = 15,
-  // Pick from proposition slots (starters, uniques, legendaries, additional picks)
-  PICK_PROPOSITION_0 = 16,
-  PICK_PROPOSITION_1 = 17,
-  PICK_PROPOSITION_2 = 18,
-  PICK_PROPOSITION_3 = 19,
-  PICK_PROPOSITION_4 = 20,
-  PICK_PROPOSITION_5 = 21
+  BUY_0 = 0, BUY_1 = 1, BUY_2 = 2, BUY_3 = 3, BUY_4 = 4, BUY_5 = 5,
+  REFRESH = 6,
+  LEVEL_UP = 7,
+  LOCK_SHOP = 8,
+  END_TURN = 9,
+  // 10-41: Move first-available unit to grid cell 0-31
+  MOVE_0 = 10,   // through MOVE_31 = 41
+  // 42-73: Sell unit at grid cell 0-31
+  SELL_0 = 42,   // through SELL_31 = 73
+  // 74-79: Remove from shop slot 0-5
+  REMOVE_SHOP_0 = 74, REMOVE_SHOP_1 = 75, REMOVE_SHOP_2 = 76,
+  REMOVE_SHOP_3 = 77, REMOVE_SHOP_4 = 78, REMOVE_SHOP_5 = 79,
+  // 80-85: Pick proposition 0-5
+  PICK_0 = 80, PICK_1 = 81, PICK_2 = 82,
+  PICK_3 = 83, PICK_4 = 84, PICK_5 = 85,
+  // 86-91: Combine items pair 0-5
+  COMBINE_0 = 86, COMBINE_1 = 87, COMBINE_2 = 88,
+  COMBINE_3 = 89, COMBINE_4 = 90, COMBINE_5 = 91,
 }
 
-export const TOTAL_ACTIONS = 22
+export const TOTAL_ACTIONS = 92
 
 // Reward shaping
 export const REWARD_PER_WIN = 0.5
