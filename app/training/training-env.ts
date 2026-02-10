@@ -1390,11 +1390,11 @@ export class TrainingEnv {
     // Star density gradually increases to simulate real player evolution curves.
     let slots: Slot[]
     if (stage >= 28) {
-      // 9 units: 5 EPIC(2☆), 2 ULTRA(2☆), 1 UNIQUE, 1 LEGENDARY
-      slots = [s("EPIC",2),s("EPIC",2),s("EPIC",2),s("EPIC",2),s("EPIC",2),s("ULTRA",2),s("ULTRA",2),s("UNIQUE"),s("LEGENDARY")]
+      // 9 units: 5 EPIC(2☆), 2 ULTRA(2☆), 1 UNIQUE(3☆), 1 LEGENDARY(3☆)
+      slots = [s("EPIC",2),s("EPIC",2),s("EPIC",2),s("EPIC",2),s("EPIC",2),s("ULTRA",2),s("ULTRA",2),s("UNIQUE",3),s("LEGENDARY",3)]
     } else if (stage >= 25) {
-      // 8 units: 1 UNIQUE, 1 LEGENDARY, 2 RARE(2☆), 2 EPIC(2☆), 2 ULTRA
-      slots = [s("UNIQUE"),s("LEGENDARY"),s("RARE",2),s("RARE",2),s("EPIC",2),s("EPIC",2),s("ULTRA"),s("ULTRA")]
+      // 8 units: 1 UNIQUE(3☆), 1 LEGENDARY(3☆), 2 RARE(2☆), 2 EPIC(2☆), 2 ULTRA
+      slots = [s("UNIQUE",3),s("LEGENDARY",3),s("RARE",2),s("RARE",2),s("EPIC",2),s("EPIC",2),s("ULTRA"),s("ULTRA")]
     } else if (stage >= 18) {
       // 7 units: 2 UNCOMMON(2☆), 2 UNCOMMON(1☆), 2 RARE(2☆), 1 EPIC
       slots = [s("UNCOMMON",2),s("UNCOMMON",2),s("UNCOMMON"),s("UNCOMMON"),s("RARE",2),s("RARE",2),s("EPIC")]
