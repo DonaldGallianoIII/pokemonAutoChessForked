@@ -1360,23 +1360,37 @@ export class TrainingEnv {
 
   /**
    * Update dummy bot teams to scale with the current stage level.
-   * Bots get more pokemon as the game progresses (roughly matching
-   * the expected team size at each stage).
+   * Team sizes and rarity pools mirror real player leveling curves
+   * so the agent experiences proper late-game pressure.
    */
   private updateDummyBotTeams(): void {
     const stage = this.state.stageLevel
-    // Target team size scales with stage: 1 at stage 1, up to ~6 by stage 30+
-    const targetSize = Math.min(6, Math.max(1, Math.ceil(stage / 5)))
 
-    // Pick rarity pool based on stage
+    // Team size matches real player leveling curve
+    const targetSize =
+      stage >= 24 ? 9
+      : stage >= 20 ? 8
+      : stage >= 17 ? 7
+      : stage >= 12 ? 6
+      : stage >= 10 ? 5
+      : stage >= 7 ? 4
+      : stage >= 5 ? 3
+      : 2
+
+    // Rarity pool by stage bracket
     const pool =
       stage >= 20
         ? PRECOMPUTED_POKEMONS_PER_RARITY.EPIC
-        : stage >= 10
-          ? PRECOMPUTED_POKEMONS_PER_RARITY.RARE
-          : stage >= 5
-            ? PRECOMPUTED_POKEMONS_PER_RARITY.UNCOMMON
-            : PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
+        : stage >= 17
+          ? [...PRECOMPUTED_POKEMONS_PER_RARITY.RARE, ...PRECOMPUTED_POKEMONS_PER_RARITY.EPIC]
+          : stage >= 10
+            ? PRECOMPUTED_POKEMONS_PER_RARITY.RARE
+            : stage >= 5
+              ? PRECOMPUTED_POKEMONS_PER_RARITY.UNCOMMON
+              : PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
+
+    // Stage 28+: bots get 1 random crafted item per pokemon
+    const giveItems = stage >= 28
 
     this.state.players.forEach((player) => {
       if (!player.isBot || !player.alive) return
@@ -1392,6 +1406,9 @@ export class TrainingEnv {
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
+        if (giveItems) {
+          pokemon.items.add(pickRandomIn(CraftableItemsNoScarves))
+        }
         player.board.set(pokemon.id, pokemon)
       }
       player.boardSize = targetSize
