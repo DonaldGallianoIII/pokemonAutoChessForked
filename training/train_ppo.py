@@ -302,7 +302,7 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
         done = False
 
         while not done:
-            action_masks = env.action_masks()
+            action_masks = env.unwrapped.action_masks()
             action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward

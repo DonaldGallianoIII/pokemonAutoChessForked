@@ -887,8 +887,19 @@ export class TrainingEnv {
       allFinished = true
       this.state.simulations.forEach((simulation) => {
         if (!simulation.finished) {
-          simulation.update(TRAINING_SIMULATION_DT)
-          allFinished = false
+          try {
+            simulation.update(TRAINING_SIMULATION_DT)
+          } catch (err) {
+            console.error(
+              `[Training] Simulation ${simulation.id} threw during update (step ${steps}), forcing DRAW:`,
+              err
+            )
+            simulation.finished = true
+            simulation.winnerId = ""
+          }
+          if (!simulation.finished) {
+            allFinished = false
+          }
         }
       })
       steps++
