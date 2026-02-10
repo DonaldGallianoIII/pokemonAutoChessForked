@@ -1365,29 +1365,52 @@ export class TrainingEnv {
    */
   private updateDummyBotTeams(): void {
     const stage = this.state.stageLevel
+    const R = PRECOMPUTED_POKEMONS_PER_RARITY
 
-    // Team size matches real player leveling curve
-    const targetSize =
-      stage >= 24 ? 9
-      : stage >= 20 ? 8
-      : stage >= 17 ? 7
-      : stage >= 12 ? 6
-      : stage >= 10 ? 5
-      : stage >= 7 ? 4
-      : stage >= 5 ? 3
-      : 2
+    // Evolution star gate by stage — prevents bots from randomly rolling
+    // fully-evolved 3-star units in the early game. Can be tightened later.
+    //   Stages 1-13:  base forms only (stars === 1)
+    //   Stages 14-24: up to 2-star evolutions
+    //   Stages 25+:   any star level (fully evolved allowed)
+    const maxStars = stage >= 25 ? 3 : stage >= 14 ? 2 : 1
 
-    // Rarity pool by stage bracket
-    const pool =
-      stage >= 20
-        ? PRECOMPUTED_POKEMONS_PER_RARITY.EPIC
-        : stage >= 17
-          ? [...PRECOMPUTED_POKEMONS_PER_RARITY.RARE, ...PRECOMPUTED_POKEMONS_PER_RARITY.EPIC]
-          : stage >= 10
-            ? PRECOMPUTED_POKEMONS_PER_RARITY.RARE
-            : stage >= 5
-              ? PRECOMPUTED_POKEMONS_PER_RARITY.UNCOMMON
-              : PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
+    // Helper: pick a random pokemon from a rarity pool respecting the star gate.
+    // Falls back to unfiltered pool if no candidates pass the filter (safety net).
+    const pickFromPool = (rarity: keyof typeof R): Pkm => {
+      const pool = R[rarity]
+      const filtered = pool.filter((p) => getPokemonData(p).stars <= maxStars)
+      return pickRandomIn(filtered.length > 0 ? filtered : pool)
+    }
+
+    // Per-slot rarity composition by stage bracket.
+    // Each entry picks one random pokemon from that rarity pool.
+    type Slot = keyof typeof R
+    let slots: Slot[]
+    if (stage >= 28) {
+      // 9 units: 5 EPIC, 2 ULTRA, 1 UNIQUE, 1 LEGENDARY
+      slots = ["EPIC","EPIC","EPIC","EPIC","EPIC","ULTRA","ULTRA","UNIQUE","LEGENDARY"]
+    } else if (stage >= 25) {
+      // 8 units: 1 UNIQUE, 1 LEGENDARY, 2 RARE, 2 EPIC, 2 ULTRA
+      slots = ["UNIQUE","LEGENDARY","RARE","RARE","EPIC","EPIC","ULTRA","ULTRA"]
+    } else if (stage >= 18) {
+      // 7 units: 4 UNCOMMON, 2 RARE, 1 EPIC
+      slots = ["UNCOMMON","UNCOMMON","UNCOMMON","UNCOMMON","RARE","RARE","EPIC"]
+    } else if (stage >= 14) {
+      // 6 units: 3 UNCOMMON, 3 RARE
+      slots = ["UNCOMMON","UNCOMMON","UNCOMMON","RARE","RARE","RARE"]
+    } else if (stage >= 10) {
+      // 5 units: 3 COMMON, 1 UNCOMMON, 1 RARE
+      slots = ["COMMON","COMMON","COMMON","UNCOMMON","RARE"]
+    } else if (stage >= 8) {
+      // 4 units: 2 COMMON, 1 UNCOMMON, 1 RARE
+      slots = ["COMMON","COMMON","UNCOMMON","RARE"]
+    } else if (stage >= 5) {
+      // 3 units: 2 COMMON, 1 UNCOMMON
+      slots = ["COMMON","COMMON","UNCOMMON"]
+    } else {
+      // 2 units: 2 COMMON
+      slots = ["COMMON","COMMON"]
+    }
 
     // Stage 28+: bots get 1 random crafted item per pokemon
     const giveItems = stage >= 28
@@ -1401,8 +1424,8 @@ export class TrainingEnv {
         player.board.delete(key)
       })
 
-      for (let t = 0; t < targetSize; t++) {
-        const pkm = pickRandomIn(pool)
+      for (let t = 0; t < slots.length; t++) {
+        const pkm = pickFromPool(slots[t])
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
@@ -1411,7 +1434,7 @@ export class TrainingEnv {
         }
         player.board.set(pokemon.id, pokemon)
       }
-      player.boardSize = targetSize
+      player.boardSize = slots.length
     })
   }
 
