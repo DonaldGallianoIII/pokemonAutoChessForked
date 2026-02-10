@@ -75,5 +75,10 @@ export const REWARD_PER_KILL = -2.0 // penalty when agent dies
 export const REWARD_PLACEMENT_SCALE = 2.0 // final reward = (9 - rank) * scale - offset
 export const REWARD_PLACEMENT_OFFSET = 6.0
 
+// Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
+// When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
+// Toggle via environment variable: SELF_PLAY=true
+export const SELF_PLAY = process.env.SELF_PLAY === "true"
+
 // HTTP server port for training API
 export const TRAINING_API_PORT = parseInt(process.env.TRAINING_PORT ?? "9100")

@@ -65,6 +65,7 @@ import {
   REWARD_PER_WIN,
   REWARD_PLACEMENT_OFFSET,
   REWARD_PLACEMENT_SCALE,
+  SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
   TRAINING_MAX_ACTIONS_PER_TURN,
@@ -105,6 +106,13 @@ export class TrainingEnv {
   additionalUncommonPool: Pkm[] = []
   additionalRarePool: Pkm[] = []
   additionalEpicPool: Pkm[] = []
+
+  // Self-play state: tracks per-player turn status across step calls within a round.
+  // Issue #1: turnEnded MUST persist across step calls — fight triggers only when
+  // the LAST alive player ends their turn, not on the first END_TURN.
+  playerIds: string[] = []
+  turnEnded: Map<string, boolean> = new Map()
+  actionsPerPlayer: Map<string, number> = new Map()
 
   async initialize() {
     // Pre-fetch bots from DB so we don't need to query every reset
@@ -152,44 +160,68 @@ export class TrainingEnv {
     shuffleArray(this.additionalRarePool)
     shuffleArray(this.additionalEpicPool)
 
-    // Create RL agent player
-    this.agentId = "rl-agent-" + nanoid(6)
-    const agentPlayer = new Player(
-      this.agentId,
-      "RL-Agent",
-      1000, // elo
-      0, // games
-      getAvatarString(PkmIndex[Pkm.PIKACHU], false),
-      false, // isBot
-      1, // rank
-      new Map(),
-      "",
-      Role.BASIC,
-      this.state
-    )
-    this.state.players.set(this.agentId, agentPlayer)
+    this.playerIds = []
 
-    // Create bot opponents
-    this.createBotPlayers()
+    if (SELF_PLAY) {
+      // Self-play: create 8 RL agent players (no bots)
+      this.createSelfPlayAgents()
+      this.agentId = this.playerIds[0] // backwards compat for getObservation etc.
 
-    // Initialize shop for agent
-    this.state.shop.assignShop(agentPlayer, false, this.state)
+      // All players get propositions at stage 0
+      this.state.players.forEach((player) => {
+        this.state.shop.assignUniquePropositions(player, this.state, [])
+      })
+
+      // Assign shops for all players
+      this.state.players.forEach((player) => {
+        this.state.shop.assignShop(player, false, this.state)
+      })
+    } else {
+      // Single-agent mode: 1 RL agent + 7 bots (Phase A curriculum training)
+      this.agentId = "rl-agent-" + nanoid(6)
+      const agentPlayer = new Player(
+        this.agentId,
+        "RL-Agent",
+        1000, // elo
+        0, // games
+        getAvatarString(PkmIndex[Pkm.PIKACHU], false),
+        false, // isBot
+        1, // rank
+        new Map(),
+        "",
+        Role.BASIC,
+        this.state
+      )
+      this.state.players.set(this.agentId, agentPlayer)
+      this.playerIds.push(this.agentId)
+
+      // Create bot opponents
+      this.createBotPlayers()
+
+      // Track bot player IDs
+      this.state.players.forEach((_player, id) => {
+        if (id !== this.agentId) this.playerIds.push(id)
+      })
+
+      // Initialize shop for agent
+      this.state.shop.assignShop(agentPlayer, false, this.state)
+
+      // Stage 0: Portal carousel gives starter pokemon propositions
+      // Agent gets propositions to choose from; bots auto-pick
+      this.state.players.forEach((player) => {
+        if (!player.isBot) {
+          this.state.shop.assignUniquePropositions(player, this.state, [])
+        }
+      })
+      // Auto-pick for bots only; agent propositions stay pending
+      this.autoPickPropositionsForBots()
+    }
 
     // Start the game
     this.state.gameLoaded = true
     this.state.stageLevel = 0
 
-    // Stage 0: Portal carousel gives starter pokemon propositions
-    // Agent gets propositions to choose from; bots auto-pick
-    this.state.players.forEach((player) => {
-      if (!player.isBot) {
-        this.state.shop.assignUniquePropositions(player, this.state, [])
-      }
-    })
-    // Auto-pick for bots only; agent propositions stay pending
-    this.autoPickPropositionsForBots()
-
-    // Stay at stage 0 with propositions — agent picks via PICK_PROPOSITION action
+    // Stay at stage 0 with propositions — agent(s) pick via PICK_PROPOSITION action
     this.state.phase = GamePhaseState.PICK
     this.state.time =
       (StageDuration[this.state.stageLevel] ?? StageDuration.DEFAULT) * 1000
@@ -197,6 +229,7 @@ export class TrainingEnv {
     this.actionsThisTurn = 0
     this.totalSteps = 0
     this.lastBattleResult = null
+    this.resetTurnState()
 
     return {
       observation: this.getObservation(),
@@ -272,7 +305,10 @@ export class TrainingEnv {
         this.autoPlaceTeam(agent)
 
         // Run the fight phase synchronously
-        reward += this.runFightPhase()
+        // Issue #2: runFightPhase returns per-player rewards so all players
+        // get their combat reward, not just the player who triggered the fight.
+        const fightRewards = this.runFightPhase()
+        reward += fightRewards.get(this.agentId) ?? 0
 
         // Check game end
         if (this.state.gameFinished || !agent.alive) {
@@ -558,20 +594,19 @@ export class TrainingEnv {
   }
 
   /**
-   * Runs the fight phase synchronously:
-   * 1. Creates matchups
-   * 2. Creates simulations
-   * 3. Loops simulation.update(dt) until all finish
-   * 4. Processes results
-   * Returns reward from the fight
+   * Runs the fight phase synchronously and returns per-player rewards.
+   *
+   * Issue #2 (reward attribution): Returns a Map of playerId → reward so that
+   * ALL players receive their combat reward after fights, not just the player
+   * whose END_TURN action happened to trigger the fight.
    */
-  private runFightPhase(): number {
+  private runFightPhase(): Map<string, number> {
     this.state.phase = GamePhaseState.FIGHT
     this.state.time = FIGHTING_PHASE_DURATION
     this.state.simulations.clear()
 
-    // Update dummy bot teams before combat
-    if (this.cachedBots.length === 0) {
+    // Update dummy bot teams before combat (only in non-self-play mode)
+    if (!SELF_PLAY && this.cachedBots.length === 0) {
       this.updateDummyBotTeams()
     }
 
@@ -581,7 +616,6 @@ export class TrainingEnv {
     })
 
     const isPVE = this.state.stageLevel in PVEStages
-    let reward = 0
 
     if (isPVE) {
       // PVE battle
@@ -731,19 +765,36 @@ export class TrainingEnv {
       this.state.gameFinished = true
     }
 
-    // Get agent battle result for reward
+    // Issue #2: Compute per-player rewards so ALL players get their combat reward.
+    // In single-agent mode only the agent's reward matters, but we compute for all
+    // to support self-play where all 8 players need rewards attributed correctly.
+    const rewards = new Map<string, number>()
+    this.state.players.forEach((player, id) => {
+      if (!player.alive) {
+        rewards.set(id, 0)
+        return
+      }
+      const lastHistory = player.history.at(-1)
+      if (lastHistory) {
+        const result = lastHistory.result as BattleResult
+        if (result === BattleResult.WIN) {
+          rewards.set(id, REWARD_PER_WIN)
+        } else if (result === BattleResult.DEFEAT) {
+          rewards.set(id, REWARD_PER_LOSS)
+        } else {
+          rewards.set(id, REWARD_PER_DRAW)
+        }
+      } else {
+        rewards.set(id, 0)
+      }
+    })
+
+    // Track agent's last battle result for logging
     const agent = this.state.players.get(this.agentId)
     if (agent) {
       const lastHistory = agent.history.at(-1)
       if (lastHistory) {
         this.lastBattleResult = lastHistory.result as BattleResult
-        if (this.lastBattleResult === BattleResult.WIN) {
-          reward += REWARD_PER_WIN
-        } else if (this.lastBattleResult === BattleResult.DEFEAT) {
-          reward += REWARD_PER_LOSS
-        } else {
-          reward += REWARD_PER_DRAW
-        }
       }
     }
 
@@ -780,7 +831,7 @@ export class TrainingEnv {
     // Rank players
     this.room.rankPlayers()
 
-    return reward
+    return rewards
   }
 
   /**
@@ -820,14 +871,20 @@ export class TrainingEnv {
       })
     }
 
-    // Refresh shop for agent (only if no pending propositions)
-    const agent = this.state.players.get(this.agentId)
-    if (agent && agent.alive && agent.pokemonsProposition.length === 0) {
-      if (!agent.shopLocked) {
-        this.state.shop.assignShop(agent, false, this.state)
-        agent.shopLocked = false
+    // Refresh shop for all RL agents (non-bots), not just a single agent.
+    // In self-play mode all 8 players need shops; in single-agent mode only the agent does.
+    this.state.players.forEach((player) => {
+      if (
+        !player.isBot &&
+        player.alive &&
+        player.pokemonsProposition.length === 0
+      ) {
+        if (!player.shopLocked) {
+          this.state.shop.assignShop(player, false, this.state)
+          player.shopLocked = false
+        }
       }
-    }
+    })
 
     // Set up PICK phase
     this.state.phase = GamePhaseState.PICK
@@ -880,8 +937,9 @@ export class TrainingEnv {
    */
   private autoPickPropositionsForBots(): void {
     this.state.players.forEach((player) => {
-      // Skip agent — agent picks via PICK_PROPOSITION actions
-      if (player.id === this.agentId) return
+      // Skip RL agents — they pick via PICK_PROPOSITION actions.
+      // In self-play mode all players are non-bot, so this is a no-op.
+      if (!player.isBot) return
       if (player.pokemonsProposition.length > 0) {
         const propositions = values(player.pokemonsProposition)
         const pick = pickRandomIn(propositions) as Pkm
@@ -1048,11 +1106,13 @@ export class TrainingEnv {
   }
 
   /**
-   * Extract observation vector for the RL agent.
+   * Extract observation vector for a player (defaults to the primary RL agent).
+   * Parameterized to support self-play where each of 8 players needs its own observation.
    */
-  getObservation(): number[] {
+  getObservation(playerId?: string): number[] {
+    const targetId = playerId ?? this.agentId
     const obs: number[] = []
-    const agent = this.state.players.get(this.agentId)
+    const agent = this.state.players.get(targetId)
 
     if (!agent) {
       return new Array(TOTAL_OBS_SIZE).fill(0)
@@ -1158,7 +1218,7 @@ export class TrainingEnv {
 
     // Opponent stats (16 = 8 opponents * 2 features)
     const opponents = values(this.state.players).filter(
-      (p) => p.id !== this.agentId
+      (p) => p.id !== targetId
     )
     for (let i = 0; i < 8; i++) {
       if (i < opponents.length) {
@@ -1207,10 +1267,12 @@ export class TrainingEnv {
 
   /**
    * Compute valid action mask (1 = valid, 0 = invalid).
+   * Parameterized to support self-play where each player needs its own mask.
    */
-  getActionMask(): number[] {
+  getActionMask(playerId?: string): number[] {
+    const targetId = playerId ?? this.agentId
     const mask = new Array(TOTAL_ACTIONS).fill(0)
-    const agent = this.state.players.get(this.agentId)
+    const agent = this.state.players.get(targetId)
 
     if (!agent || !agent.alive || this.state.phase !== GamePhaseState.PICK) {
       mask[TrainingAction.END_TURN] = 1
@@ -1302,8 +1364,9 @@ export class TrainingEnv {
     return (9 - agent.rank) * REWARD_PLACEMENT_SCALE - REWARD_PLACEMENT_OFFSET
   }
 
-  private getInfo(): StepResult["info"] {
-    const agent = this.state.players.get(this.agentId)
+  private getInfo(playerId?: string): StepResult["info"] {
+    const targetId = playerId ?? this.agentId
+    const agent = this.state.players.get(targetId)
     return {
       stage: this.state.stageLevel,
       phase:
@@ -1315,8 +1378,226 @@ export class TrainingEnv {
       rank: agent?.rank ?? 8,
       life: agent?.life ?? 0,
       money: agent?.money ?? 0,
-      actionsThisTurn: this.actionsThisTurn,
-      actionMask: this.getActionMask()
+      actionsThisTurn: SELF_PLAY
+        ? (this.actionsPerPlayer.get(targetId) ?? 0)
+        : this.actionsThisTurn,
+      actionMask: this.getActionMask(targetId)
     }
+  }
+
+  // ─── Self-play infrastructure ───────────────────────────────────────────
+
+  /**
+   * Reset turn-tracking state at the start of each pick phase.
+   * Called after fights resolve and before the next round of actions.
+   */
+  private resetTurnState(): void {
+    this.turnEnded.clear()
+    this.actionsPerPlayer.clear()
+    this.state.players.forEach((_player, id) => {
+      this.turnEnded.set(id, false)
+      this.actionsPerPlayer.set(id, 0)
+    })
+  }
+
+  /**
+   * Create 8 RL agent players for self-play mode (no bots).
+   */
+  private createSelfPlayAgents(): void {
+    for (let i = 0; i < 8; i++) {
+      const playerId = `rl-agent-${i}-${nanoid(6)}`
+      const player = new Player(
+        playerId,
+        `RL-Agent-${i}`,
+        1000,
+        0,
+        getAvatarString(PkmIndex[Pkm.PIKACHU], false),
+        false, // isBot = false (RL agent)
+        i + 1,
+        new Map(),
+        "",
+        Role.BASIC,
+        this.state
+      )
+      this.state.players.set(playerId, player)
+      this.playerIds.push(playerId)
+    }
+  }
+
+  /**
+   * Self-play batch step: process one action per player simultaneously.
+   *
+   * This is the core method for the SelfPlayVecEnv. sb3 calls step() once
+   * with 8 actions (one per sub-env/player) and expects 8 transitions back.
+   *
+   * Three critical semantics (flagged during design review):
+   *
+   * Issue #1 (fight trigger timing): turnEnded[] persists across step calls
+   * within a round. Fight triggers ONLY when the LAST alive player ends their
+   * turn, not on the first END_TURN. Player 1 might end turn in call N, but
+   * the fight doesn't run until player 8 ends in call N+3.
+   *
+   * Issue #2 (reward attribution): When the fight triggers, ALL 8 players
+   * get their combat reward in that response — not just the player whose
+   * END_TURN happened to be last.
+   *
+   * Issue #3 (VecEnv reset semantics): Dead players return done=False with
+   * END_TURN-only action mask until the game ACTUALLY ends. Only when
+   * gameFinished do ALL 8 players return done=True simultaneously.
+   * This prevents sb3 from trying to auto-reset individual sub-envs mid-game.
+   */
+  stepBatch(actions: number[]): StepResult[] {
+    if (!SELF_PLAY) {
+      throw new Error("stepBatch is only available in SELF_PLAY mode")
+    }
+
+    if (actions.length !== this.playerIds.length) {
+      throw new Error(
+        `Expected ${this.playerIds.length} actions, got ${actions.length}`
+      )
+    }
+
+    this.totalSteps++
+
+    // If game already finished, return terminal state for all players
+    if (this.state.gameFinished) {
+      return this.playerIds.map((id) => ({
+        observation: this.getObservation(id),
+        reward: 0,
+        done: true,
+        info: this.getInfo(id)
+      }))
+    }
+
+    // ── Phase 1: Process each player's action ──────────────────────────
+
+    for (let i = 0; i < this.playerIds.length; i++) {
+      const playerId = this.playerIds[i]
+      const player = this.state.players.get(playerId)!
+      const action = actions[i]
+
+      // Issue #3: Dead players are no-ops. They send END_TURN (masked to
+      // only allow it) and we skip processing entirely.
+      if (!player.alive) {
+        continue
+      }
+
+      // Player already ended turn this round: no-op (padding for sb3)
+      if (this.turnEnded.get(playerId)) {
+        continue
+      }
+
+      // Handle proposition picking (stage 0 starters, uniques, additionals)
+      if (player.pokemonsProposition.length > 0) {
+        if (
+          action >= TrainingAction.PICK_PROPOSITION_0 &&
+          action <= TrainingAction.PICK_PROPOSITION_5
+        ) {
+          this.pickProposition(
+            player,
+            action - TrainingAction.PICK_PROPOSITION_0
+          )
+        }
+        // Don't count proposition picks toward turn end — player continues shopping
+        continue
+      }
+
+      // Execute normal PICK phase action
+      this.executeAction(action, player)
+      const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
+      this.actionsPerPlayer.set(playerId, actCount)
+
+      // Check if this player's turn should end
+      if (
+        action === TrainingAction.END_TURN ||
+        actCount >= TRAINING_MAX_ACTIONS_PER_TURN
+      ) {
+        this.turnEnded.set(playerId, true)
+
+        // Safety: auto-resolve any pending propositions
+        if (player.pokemonsProposition.length > 0) {
+          this.autoPickForAgent(player)
+        }
+
+        // Auto-place team on board
+        this.autoPlaceTeam(player)
+      }
+    }
+
+    // ── Phase 2: Check fight trigger ────────────────────────────────────
+    // Issue #1: Fight triggers when ALL alive players have ended their turn.
+    // turnEnded persists across calls — a player who ended in call N stays
+    // ended until the fight resolves and resetTurnState() is called.
+
+    let fightTriggered = false
+    let perPlayerRewards = new Map<string, number>()
+
+    // Handle stage 0 specially: advance to stage 1 when all players have
+    // picked their propositions (no fight at stage 0)
+    if (this.state.stageLevel === 0) {
+      const allPicked = this.playerIds.every((id) => {
+        const player = this.state.players.get(id)!
+        return player.pokemonsProposition.length === 0
+      })
+      if (allPicked) {
+        this.state.stageLevel = 1
+        this.state.players.forEach((player) => {
+          if (player.alive) {
+            this.state.shop.assignShop(player, false, this.state)
+          }
+        })
+        this.resetTurnState()
+      }
+    } else {
+      const allAliveEnded = this.playerIds.every((id) => {
+        const player = this.state.players.get(id)!
+        return !player.alive || this.turnEnded.get(id)
+      })
+
+      if (allAliveEnded) {
+        // All alive players have ended turn — run fight
+        perPlayerRewards = this.runFightPhase()
+        fightTriggered = true
+
+        if (!this.state.gameFinished) {
+          this.advanceToNextPickPhase()
+          this.resetTurnState()
+        }
+      }
+    }
+
+    // ── Phase 3: Build per-player results ───────────────────────────────
+
+    return this.playerIds.map((id) => {
+      const player = this.state.players.get(id)!
+      let reward = 0
+      let done = false
+
+      if (fightTriggered) {
+        // Issue #2: ALL players get their combat reward
+        reward = perPlayerRewards.get(id) ?? 0
+
+        if (this.state.gameFinished) {
+          reward += this.computeFinalReward(player)
+          // Issue #3: ALL players get done=True simultaneously
+          done = true
+        }
+      }
+
+      // Issue #3: Dead players MUST return done=False until the game
+      // actually ends. If we returned done=True for dead players mid-game,
+      // sb3's VecEnv would try to auto-reset that sub-env, which would
+      // destroy the shared game state for all other players.
+      if (!player.alive && !this.state.gameFinished) {
+        done = false
+      }
+
+      return {
+        observation: this.getObservation(id),
+        reward,
+        done,
+        info: this.getInfo(id)
+      }
+    })
   }
 }
