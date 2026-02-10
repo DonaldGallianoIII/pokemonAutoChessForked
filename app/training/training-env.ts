@@ -73,6 +73,7 @@ import {
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
+  REWARD_BENCH_PENALTY,
   REWARD_HP_SCALE,
   REWARD_INTEREST_BONUS,
   REWARD_PER_DRAW,
@@ -130,6 +131,13 @@ export class TrainingEnv {
   additionalUncommonPool: Pkm[] = []
   additionalRarePool: Pkm[] = []
   additionalEpicPool: Pkm[] = []
+
+  // 7.2: Caches for hot-path optimization
+  private positionGridCache = new Map<string, Map<number, Pokemon>>() // playerId → (cellKey → Pokemon)
+  private positionGridDirty = new Set<string>() // playerIds whose grid needs rebuild
+  private itemPairCache = new Map<string, [number, number][]>() // playerId → cached pairs
+  private observationCache = new Map<string, number[]>() // playerId → cached obs
+  private observationDirty = new Set<string>() // playerIds whose obs needs rebuild
 
   // Self-play state: tracks per-player turn status across step calls within a round.
   // Issue #1: turnEnded MUST persist across step calls — fight triggers only when
@@ -254,6 +262,11 @@ export class TrainingEnv {
     this.totalSteps = 0
     this.lastBattleResult = null
     this.prevActiveSynergyCount = 0
+    this.positionGridCache.clear()
+    this.positionGridDirty.clear()
+    this.itemPairCache.clear()
+    this.observationCache.clear()
+    this.observationDirty.clear()
     this.resetTurnState()
 
     return {
@@ -329,6 +342,25 @@ export class TrainingEnv {
         // Auto-place pokemon on board if there's room
         if (TRAINING_AUTO_PLACE) {
           this.autoPlaceTeam(agent)
+        }
+
+        // 7.1: Bench penalty — penalize units left on bench when board has open slots
+        if (!TRAINING_AUTO_PLACE) {
+          const maxTeamSize = getMaxTeamSize(
+            agent.experienceManager.level,
+            this.state.specialGameRule
+          )
+          if (agent.boardSize < maxTeamSize) {
+            let benchCount = 0
+            agent.board.forEach((p) => {
+              if (isOnBench(p)) benchCount++
+            })
+            if (benchCount > 0) {
+              const openSlots = maxTeamSize - agent.boardSize
+              const penaltyUnits = Math.min(benchCount, openSlots)
+              reward += penaltyUnits * REWARD_BENCH_PENALTY
+            }
+          }
         }
 
         // Run the fight phase synchronously
@@ -493,6 +525,7 @@ export class TrainingEnv {
       }
     })
 
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -509,6 +542,7 @@ export class TrainingEnv {
 
     player.items.push(item)
     player.itemsProposition.clear()
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -537,6 +571,7 @@ export class TrainingEnv {
     player.shop[shopIndex] = Pkm.DEFAULT
 
     this.room.checkEvolutionsAfterPokemonAcquired(this.agentId)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -561,6 +596,7 @@ export class TrainingEnv {
 
     player.updateSynergies()
     player.boardSize = this.room.getTeamSize(player.board)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -574,6 +610,7 @@ export class TrainingEnv {
       player.shopFreeRolls--
     }
     this.state.shop.assignShop(player, true, this.state)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -584,6 +621,7 @@ export class TrainingEnv {
 
     player.addExperience(4)
     player.money -= cost
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -639,6 +677,7 @@ export class TrainingEnv {
       pokemon.onChangePosition(targetX, targetY, player, this.state)
     }
     player.updateSynergies()
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -653,12 +692,13 @@ export class TrainingEnv {
     player.shop[shopIndex] = Pkm.DEFAULT
     player.shopLocked = true
     this.state.shop.releasePokemon(name, player, this.state)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
   private combineItems(player: Player, pairIndex: number): boolean {
     const items = Array.from(player.items.values()) as Item[]
-    const pairs = enumerateItemPairs(items)
+    const pairs = this.getCachedItemPairs(player.id, items)
     if (pairIndex >= pairs.length) return false
 
     const [i, j] = pairs[pairIndex]
@@ -671,6 +711,7 @@ export class TrainingEnv {
     player.items.splice(j, 1)
     player.items.splice(i, 1)
     player.items.push(result)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -709,6 +750,7 @@ export class TrainingEnv {
       }
       player.updateSynergies()
       player.boardSize = this.room.getTeamSize(player.board)
+      this.invalidatePlayerCaches(player.id)
     }
   }
 
@@ -1047,6 +1089,11 @@ export class TrainingEnv {
     // Rank players
     this.room.rankPlayers()
 
+    // 7.2: Invalidate all caches after fight (board state changed)
+    this.state.players.forEach((_player, id) => {
+      this.invalidatePlayerCaches(id)
+    })
+
     return rewards
   }
 
@@ -1145,6 +1192,11 @@ export class TrainingEnv {
 
     // Auto-pick for bots only; agent propositions stay pending for PICK actions
     this.autoPickPropositionsForBots()
+
+    // 7.2: Invalidate all caches after phase transition (shops, propositions changed)
+    this.state.players.forEach((_player, id) => {
+      this.invalidatePlayerCaches(id)
+    })
 
     // Snapshot synergy count at start of pick phase for delta reward (6.2)
     const agentForSynergy = this.state.players.get(this.agentId)
@@ -1341,12 +1393,18 @@ export class TrainingEnv {
    */
   getObservation(playerId?: string): number[] {
     const targetId = playerId ?? this.agentId
-    const obs: number[] = []
     const agent = this.state.players.get(targetId)
 
     if (!agent) {
       return new Array(TOTAL_OBS_SIZE).fill(0)
     }
+
+    // 7.2: Return cached observation if still valid
+    if (!this.observationDirty.has(targetId) && this.observationCache.has(targetId)) {
+      return this.observationCache.get(targetId)!
+    }
+
+    const obs: number[] = []
 
     const rarityMap: Record<string, number> = {
       [Rarity.COMMON]: 0.1,
@@ -1543,7 +1601,11 @@ export class TrainingEnv {
     // Pad to exact size if needed
     while (obs.length < TOTAL_OBS_SIZE) obs.push(0)
 
-    return obs.slice(0, TOTAL_OBS_SIZE)
+    const result = obs.slice(0, TOTAL_OBS_SIZE)
+    // 7.2: Cache the observation
+    this.observationCache.set(targetId, result)
+    this.observationDirty.delete(targetId)
+    return result
   }
 
   /**
@@ -1667,7 +1729,7 @@ export class TrainingEnv {
     // COMBINE — valid pairs of held items that form a recipe
     if (agent.items.length >= 2) {
       const items = Array.from(agent.items.values()) as Item[]
-      const pairs = enumerateItemPairs(items)
+      const pairs = this.getCachedItemPairs(targetId, items)
       for (let p = 0; p < pairs.length; p++) {
         const [i, j] = pairs[p]
         if (findRecipeResult(items[i], items[j])) {
@@ -1684,13 +1746,48 @@ export class TrainingEnv {
     x: number,
     y: number
   ): Pokemon | null {
-    let found: Pokemon | null = null
+    const grid = this.getPositionGrid(player)
+    const cellKey = y * GRID_WIDTH + x
+    return grid.get(cellKey) ?? null
+  }
+
+  /**
+   * 7.2: Build or return cached position grid for a player.
+   * Maps cell index (y*8+x) → Pokemon for O(1) lookups.
+   */
+  private getPositionGrid(player: Player): Map<number, Pokemon> {
+    if (!this.positionGridDirty.has(player.id) && this.positionGridCache.has(player.id)) {
+      return this.positionGridCache.get(player.id)!
+    }
+    const grid = new Map<number, Pokemon>()
     player.board.forEach((pokemon) => {
-      if (pokemon.positionX === x && pokemon.positionY === y) {
-        found = pokemon
-      }
+      const cellKey = pokemon.positionY * GRID_WIDTH + pokemon.positionX
+      grid.set(cellKey, pokemon)
     })
-    return found
+    this.positionGridCache.set(player.id, grid)
+    this.positionGridDirty.delete(player.id)
+    return grid
+  }
+
+  /**
+   * 7.2: Invalidate position grid and observation cache for a player.
+   * Call after any board mutation (buy, sell, move, evolution, etc.).
+   */
+  private invalidatePlayerCaches(playerId: string): void {
+    this.positionGridDirty.add(playerId)
+    this.observationDirty.add(playerId)
+    this.itemPairCache.delete(playerId)
+  }
+
+  /**
+   * 7.2: Return cached item pairs for a player, recomputing only when invalidated.
+   */
+  private getCachedItemPairs(playerId: string, items: Item[]): [number, number][] {
+    const cached = this.itemPairCache.get(playerId)
+    if (cached) return cached
+    const pairs = enumerateItemPairs(items as string[])
+    this.itemPairCache.set(playerId, pairs)
+    return pairs
   }
 
   /**
@@ -1908,6 +2005,32 @@ export class TrainingEnv {
       }
     }
 
+    // 7.1: Bench penalty for all alive RL players at turn end (batch path)
+    const benchPenalties = new Map<string, number>()
+    if (!TRAINING_AUTO_PLACE) {
+      for (let i = 0; i < this.playerIds.length; i++) {
+        const playerId = this.playerIds[i]
+        if (!this.turnEnded.get(playerId)) continue
+        const player = this.state.players.get(playerId)!
+        if (!player.alive) continue
+        const maxTeamSize = getMaxTeamSize(
+          player.experienceManager.level,
+          this.state.specialGameRule
+        )
+        if (player.boardSize < maxTeamSize) {
+          let benchCount = 0
+          player.board.forEach((p) => {
+            if (isOnBench(p)) benchCount++
+          })
+          if (benchCount > 0) {
+            const openSlots = maxTeamSize - player.boardSize
+            const penaltyUnits = Math.min(benchCount, openSlots)
+            benchPenalties.set(playerId, penaltyUnits * REWARD_BENCH_PENALTY)
+          }
+        }
+      }
+    }
+
     // ── Phase 2: Check fight trigger ────────────────────────────────────
     // Issue #1: Fight triggers when ALL alive players have ended their turn.
     // turnEnded persists across calls — a player who ended in call N stays
@@ -1957,9 +2080,12 @@ export class TrainingEnv {
       let reward = 0
       let done = false
 
+      // 7.1: Add bench penalty (computed before fight)
+      reward += benchPenalties.get(id) ?? 0
+
       if (fightTriggered) {
         // Issue #2: ALL players get their combat reward
-        reward = perPlayerRewards.get(id) ?? 0
+        reward += perPlayerRewards.get(id) ?? 0
 
         if (this.state.gameFinished) {
           reward += this.computeFinalReward(player)
