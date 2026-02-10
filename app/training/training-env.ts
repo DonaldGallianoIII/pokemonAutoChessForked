@@ -1376,8 +1376,8 @@ export class TrainingEnv {
     const stage = this.state.stageLevel
     const R = PRECOMPUTED_POKEMONS_PER_RARITY
 
-    // Each slot defines a rarity, target star level, and whether it gets a guaranteed item.
-    type Slot = { rarity: keyof typeof R; stars: number; item?: boolean }
+    // Each slot defines a rarity and target star level.
+    type Slot = { rarity: keyof typeof R; stars: number }
 
     // Helper: pick a random pokemon from a rarity pool at the target star level,
     // filtered to the bot's assigned synergy theme. Fallback chain:
@@ -1403,71 +1403,52 @@ export class TrainingEnv {
       return pickRandomIn(fallback.length > 0 ? fallback : pool)
     }
 
-    // s(rarity, stars, item?) shorthand for slot definitions
-    const s = (rarity: keyof typeof R, stars = 1, item = false): Slot => ({ rarity, stars, item })
+    // s(rarity, stars) shorthand for slot definitions
+    const s = (rarity: keyof typeof R, stars = 1): Slot => ({ rarity, stars })
 
     // Per-slot composition by stage bracket.
     // UNIQUE persists from stage 11+, LEGENDARY from stage 21+.
-    // Items marked with `true` are guaranteed on that slot.
-    // Additional random items go on non-guaranteed slots.
+    // Bots carry no items to keep difficulty approachable.
     let slots: Slot[]
-    let extraItems = 0 // additional items on random non-guaranteed slots
 
     if (stage >= 28) {
-      // 9 units: ALL get 1 item
       slots = [
-        s("UNIQUE",3,true), s("LEGENDARY",3,true),
-        s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true),
-        s("ULTRA",2,true), s("ULTRA",2,true)
+        s("UNIQUE",3), s("LEGENDARY",3),
+        s("EPIC",2), s("EPIC",2), s("EPIC",2), s("EPIC",2), s("EPIC",2),
+        s("ULTRA",2), s("ULTRA",2)
       ]
     } else if (stage >= 25) {
-      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 random items on others
       slots = [
-        s("UNIQUE",3,true), s("LEGENDARY",3,true),
+        s("UNIQUE",3), s("LEGENDARY",3),
         s("RARE",3), s("RARE",3), s("EPIC",2), s("EPIC",2), s("ULTRA",2), s("ULTRA",1)
       ]
-      extraItems = 2
     } else if (stage >= 21) {
-      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 random items on others
       slots = [
-        s("UNIQUE",3,true), s("LEGENDARY",3,true),
+        s("UNIQUE",3), s("LEGENDARY",3),
         s("RARE",2), s("RARE",2), s("EPIC",2), s("EPIC",1), s("EPIC",1), s("ULTRA",1)
       ]
-      extraItems = 2
     } else if (stage >= 18) {
-      // 7 units: UNIQUE(item) + 2 random items on others
       slots = [
-        s("UNIQUE",3,true),
+        s("UNIQUE",3),
         s("RARE",2), s("RARE",2), s("RARE",2), s("RARE",2), s("EPIC",1), s("EPIC",1)
       ]
-      extraItems = 2
     } else if (stage >= 14) {
-      // 7 units: UNIQUE(item) + 2 random items on others
       slots = [
-        s("UNIQUE",3,true),
+        s("UNIQUE",3),
         s("UNCOMMON",2), s("UNCOMMON",1), s("RARE",2), s("RARE",1), s("RARE",1), s("EPIC",1)
       ]
-      extraItems = 2
     } else if (stage >= 11) {
-      // 6 units: UNIQUE(item) + 1 random item on other
       slots = [
-        s("UNIQUE",3,true),
+        s("UNIQUE",3),
         s("COMMON",2), s("COMMON",2), s("UNCOMMON",1), s("RARE",1), s("RARE",1)
       ]
-      extraItems = 1
     } else if (stage >= 10) {
-      // 5 units: 1 item on random unit
       slots = [s("COMMON",2), s("COMMON",2), s("COMMON",1), s("UNCOMMON",1), s("RARE",1)]
-      extraItems = 1
     } else if (stage >= 8) {
-      // 4 units: 1 item on random unit
       slots = [s("COMMON",2), s("COMMON",1), s("UNCOMMON",1), s("RARE",1)]
-      extraItems = 1
     } else if (stage >= 5) {
-      // 3 units: no items
       slots = [s("COMMON",1), s("COMMON",1), s("UNCOMMON",1)]
     } else {
-      // 2 units: no items
       slots = [s("COMMON",1), s("COMMON",1)]
     }
 
@@ -1475,24 +1456,24 @@ export class TrainingEnv {
       if (!player.isBot || !player.alive) return
       if (!player.id.startsWith("dummy-bot-")) return
 
-      // Each bot commits to a synergy theme (assigned at creation, persists all game)
-      const synergy = this.botSynergies.get(player.id) ?? pickRandomIn(SynergyArray)
+      // Each bot uses a different synergy per group of 3 slots for type diversity.
+      // The first group uses the bot's assigned theme; subsequent groups pick a
+      // new synergy that hasn't been used yet on this board.
+      const baseSynergy = this.botSynergies.get(player.id) ?? pickRandomIn(SynergyArray)
+      const groupCount = Math.ceil(slots.length / 3)
+      const groupSynergies: Synergy[] = [baseSynergy]
+      for (let g = 1; g < groupCount; g++) {
+        let next: Synergy
+        do {
+          next = pickRandomIn(SynergyArray)
+        } while (groupSynergies.includes(next))
+        groupSynergies.push(next)
+      }
 
       // Clear existing board and rebuild
       player.board.forEach((_pokemon, key) => {
         player.board.delete(key)
       })
-
-      // Determine which non-guaranteed slots get extra random items
-      const extraItemIndices = new Set<number>()
-      if (extraItems > 0) {
-        const eligible = slots
-          .map((slot, i) => (!slot.item ? i : -1))
-          .filter((i) => i >= 0)
-        while (extraItemIndices.size < Math.min(extraItems, eligible.length)) {
-          extraItemIndices.add(eligible[Math.floor(Math.random() * eligible.length)])
-        }
-      }
 
       // Place units using range-based positioning (same priority as real game):
       //   Range 1 (melee):   front first  → rows [3, 2, 1]
@@ -1518,12 +1499,10 @@ export class TrainingEnv {
       }
 
       for (let t = 0; t < slots.length; t++) {
+        const synergy = groupSynergies[Math.floor(t / 3)]
         const pkm = pickFromPool(slots[t], synergy)
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         placeUnit(pokemon, getPokemonData(pkm).range)
-        if (slots[t].item || extraItemIndices.has(t)) {
-          pokemon.items.add(pickRandomIn(CraftableItemsNoScarves))
-        }
         player.board.set(pokemon.id, pokemon)
       }
       player.boardSize = slots.length
