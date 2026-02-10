@@ -1365,29 +1365,37 @@ export class TrainingEnv {
    */
   private updateDummyBotTeams(): void {
     const stage = this.state.stageLevel
+    const R = PRECOMPUTED_POKEMONS_PER_RARITY
 
-    // Team size matches real player leveling curve
-    const targetSize =
-      stage >= 28 ? 9
-      : stage >= 25 ? 8
-      : stage >= 18 ? 7
-      : stage >= 14 ? 6
-      : stage >= 10 ? 5
-      : stage >= 8 ? 4
-      : stage >= 5 ? 3
-      : 2
-
-    // Rarity pool by stage bracket
-    const pool =
-      stage >= 20
-        ? PRECOMPUTED_POKEMONS_PER_RARITY.EPIC
-        : stage >= 17
-          ? [...PRECOMPUTED_POKEMONS_PER_RARITY.RARE, ...PRECOMPUTED_POKEMONS_PER_RARITY.EPIC]
-          : stage >= 10
-            ? PRECOMPUTED_POKEMONS_PER_RARITY.RARE
-            : stage >= 5
-              ? PRECOMPUTED_POKEMONS_PER_RARITY.UNCOMMON
-              : PRECOMPUTED_POKEMONS_PER_RARITY.COMMON
+    // Per-slot rarity composition by stage bracket.
+    // Each entry picks one random pokemon from that rarity pool.
+    type Slot = keyof typeof R
+    let slots: Slot[]
+    if (stage >= 28) {
+      // 9 units: 5 EPIC, 2 ULTRA, 1 UNIQUE, 1 LEGENDARY
+      slots = ["EPIC","EPIC","EPIC","EPIC","EPIC","ULTRA","ULTRA","UNIQUE","LEGENDARY"]
+    } else if (stage >= 25) {
+      // 8 units: 1 UNIQUE, 1 LEGENDARY, 2 RARE, 2 EPIC, 2 ULTRA
+      slots = ["UNIQUE","LEGENDARY","RARE","RARE","EPIC","EPIC","ULTRA","ULTRA"]
+    } else if (stage >= 18) {
+      // 7 units: 4 UNCOMMON, 2 RARE, 1 EPIC
+      slots = ["UNCOMMON","UNCOMMON","UNCOMMON","UNCOMMON","RARE","RARE","EPIC"]
+    } else if (stage >= 14) {
+      // 6 units: 3 UNCOMMON, 3 RARE
+      slots = ["UNCOMMON","UNCOMMON","UNCOMMON","RARE","RARE","RARE"]
+    } else if (stage >= 10) {
+      // 5 units: 3 COMMON, 1 UNCOMMON, 1 RARE
+      slots = ["COMMON","COMMON","COMMON","UNCOMMON","RARE"]
+    } else if (stage >= 8) {
+      // 4 units: 2 COMMON, 1 UNCOMMON, 1 RARE
+      slots = ["COMMON","COMMON","UNCOMMON","RARE"]
+    } else if (stage >= 5) {
+      // 3 units: 2 COMMON, 1 UNCOMMON
+      slots = ["COMMON","COMMON","UNCOMMON"]
+    } else {
+      // 2 units: 2 COMMON
+      slots = ["COMMON","COMMON"]
+    }
 
     // Stage 28+: bots get 1 random crafted item per pokemon
     const giveItems = stage >= 28
@@ -1401,8 +1409,8 @@ export class TrainingEnv {
         player.board.delete(key)
       })
 
-      for (let t = 0; t < targetSize; t++) {
-        const pkm = pickRandomIn(pool)
+      for (let t = 0; t < slots.length; t++) {
+        const pkm = pickRandomIn(R[slots[t]])
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
@@ -1411,7 +1419,7 @@ export class TrainingEnv {
         }
         player.board.set(pokemon.id, pokemon)
       }
-      player.boardSize = targetSize
+      player.boardSize = slots.length
     })
   }
 
