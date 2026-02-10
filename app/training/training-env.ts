@@ -15,7 +15,8 @@ import {
   FIGHTING_PHASE_DURATION,
   ItemCarouselStages,
   PortalCarouselStages,
-  StageDuration
+  StageDuration,
+  SynergyTriggers
 } from "../config"
 import { selectMatchups } from "../core/matchmaking"
 import Simulation from "../core/simulation"
@@ -56,18 +57,37 @@ import { pickNRandomIn, pickRandomIn, shuffleArray } from "../utils/random"
 import { values } from "../utils/schemas"
 import { HeadlessRoom } from "./headless-room"
 import {
+  cellToXY,
+  enumerateItemPairs,
+  findRecipeResult,
+  getItemIndex,
+  getPkmSpeciesIndex,
+  getSynergyIndex,
+  getWeatherIndex,
+  GRID_CELLS,
+  GRID_HEIGHT,
+  GRID_WIDTH,
   MAX_PROPOSITIONS,
+  OBS_HELD_ITEMS,
+  OBS_OPPONENT_COUNT,
+  OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
+  REWARD_BENCH_PENALTY,
+  REWARD_HP_SCALE,
+  REWARD_INTEREST_BONUS,
   REWARD_PER_DRAW,
+  REWARD_PER_ENEMY_KILL,
   REWARD_PER_KILL,
   REWARD_PER_LOSS,
   REWARD_PER_WIN,
   REWARD_PLACEMENT_OFFSET,
   REWARD_PLACEMENT_SCALE,
+  REWARD_SYNERGY_THRESHOLD,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
+  TRAINING_AUTO_PLACE,
   TRAINING_MAX_ACTIONS_PER_TURN,
   TRAINING_MAX_FIGHT_STEPS,
   TRAINING_NUM_OPPONENTS,
@@ -92,6 +112,10 @@ export interface StepResult {
     money: number
     actionsThisTurn: number
     actionMask: number[]
+    gold: number
+    boardSize: number
+    synergyCount: number
+    itemsHeld: number
   }
 }
 
@@ -102,10 +126,18 @@ export class TrainingEnv {
   actionsThisTurn = 0
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
+  prevActiveSynergyCount = 0
   cachedBots: IBot[] = []
   additionalUncommonPool: Pkm[] = []
   additionalRarePool: Pkm[] = []
   additionalEpicPool: Pkm[] = []
+
+  // 7.2: Caches for hot-path optimization
+  private positionGridCache = new Map<string, Map<number, Pokemon>>() // playerId → (cellKey → Pokemon)
+  private positionGridDirty = new Set<string>() // playerIds whose grid needs rebuild
+  private itemPairCache = new Map<string, [number, number][]>() // playerId → cached pairs
+  private observationCache = new Map<string, number[]>() // playerId → cached obs
+  private observationDirty = new Set<string>() // playerIds whose obs needs rebuild
 
   // Self-play state: tracks per-player turn status across step calls within a round.
   // Issue #1: turnEnded MUST persist across step calls — fight triggers only when
@@ -221,7 +253,7 @@ export class TrainingEnv {
     this.state.gameLoaded = true
     this.state.stageLevel = 0
 
-    // Stay at stage 0 with propositions — agent(s) pick via PICK_PROPOSITION action
+    // Stay at stage 0 with propositions — agent(s) pick via PICK action
     this.state.phase = GamePhaseState.PICK
     this.state.time =
       (StageDuration[this.state.stageLevel] ?? StageDuration.DEFAULT) * 1000
@@ -229,6 +261,12 @@ export class TrainingEnv {
     this.actionsThisTurn = 0
     this.totalSteps = 0
     this.lastBattleResult = null
+    this.prevActiveSynergyCount = 0
+    this.positionGridCache.clear()
+    this.positionGridDirty.clear()
+    this.itemPairCache.clear()
+    this.observationCache.clear()
+    this.observationDirty.clear()
     this.resetTurnState()
 
     return {
@@ -270,8 +308,8 @@ export class TrainingEnv {
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
         actionExecuted &&
-        action >= TrainingAction.PICK_PROPOSITION_0 &&
-        action <= TrainingAction.PICK_PROPOSITION_5
+        action >= TrainingAction.PICK_0 &&
+        action <= TrainingAction.PICK_0 + 5
       ) {
         // After picking, if still at stage 0, advance to stage 1
         if (this.state.stageLevel === 0) {
@@ -297,12 +335,33 @@ export class TrainingEnv {
 
       if (shouldEndTurn) {
         // Safety: if propositions are still pending at turn end, auto-pick randomly
-        if (agent.pokemonsProposition.length > 0) {
+        if (agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0) {
           this.autoPickForAgent(agent)
         }
 
         // Auto-place pokemon on board if there's room
-        this.autoPlaceTeam(agent)
+        if (TRAINING_AUTO_PLACE) {
+          this.autoPlaceTeam(agent)
+        }
+
+        // 7.1: Bench penalty — penalize units left on bench when board has open slots
+        if (!TRAINING_AUTO_PLACE) {
+          const maxTeamSize = getMaxTeamSize(
+            agent.experienceManager.level,
+            this.state.specialGameRule
+          )
+          if (agent.boardSize < maxTeamSize) {
+            let benchCount = 0
+            agent.board.forEach((p) => {
+              if (isOnBench(p)) benchCount++
+            })
+            if (benchCount > 0) {
+              const openSlots = maxTeamSize - agent.boardSize
+              const penaltyUnits = Math.min(benchCount, openSlots)
+              reward += penaltyUnits * REWARD_BENCH_PENALTY
+            }
+          }
+        }
 
         // Run the fight phase synchronously
         // Issue #2: runFightPhase returns per-player rewards so all players
@@ -336,64 +395,61 @@ export class TrainingEnv {
   }
 
   private executeAction(action: number, agent: Player): boolean {
-    // If agent has propositions pending, only allow PICK_PROPOSITION actions
+    // If agent has pokemon propositions pending, only allow PICK actions
     if (agent.pokemonsProposition.length > 0) {
-      if (
-        action >= TrainingAction.PICK_PROPOSITION_0 &&
-        action <= TrainingAction.PICK_PROPOSITION_5
-      ) {
-        const propositionIndex =
-          action - TrainingAction.PICK_PROPOSITION_0
-        return this.pickProposition(agent, propositionIndex)
+      if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
+        return this.pickProposition(agent, action - TrainingAction.PICK_0)
       }
       return false // no other actions allowed during proposition phase
     }
 
-    switch (action) {
-      case TrainingAction.END_TURN:
-        return true
-
-      case TrainingAction.BUY_0:
-      case TrainingAction.BUY_1:
-      case TrainingAction.BUY_2:
-      case TrainingAction.BUY_3:
-      case TrainingAction.BUY_4: {
-        const shopIndex = action - TrainingAction.BUY_0
-        return this.buyPokemon(agent, shopIndex)
+    // Item-only propositions (item carousel, PVE rewards)
+    if (agent.itemsProposition.length > 0) {
+      if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
+        return this.pickItemProposition(agent, action - TrainingAction.PICK_0)
       }
-
-      case TrainingAction.SELL_0:
-      case TrainingAction.SELL_1:
-      case TrainingAction.SELL_2:
-      case TrainingAction.SELL_3:
-      case TrainingAction.SELL_4:
-      case TrainingAction.SELL_5:
-      case TrainingAction.SELL_6:
-      case TrainingAction.SELL_7: {
-        const benchIndex = action - TrainingAction.SELL_0
-        return this.sellPokemonAtBench(agent, benchIndex)
-      }
-
-      case TrainingAction.REROLL:
-        return this.rerollShop(agent)
-
-      case TrainingAction.LEVEL_UP:
-        return this.levelUp(agent)
-
-      case TrainingAction.PICK_PROPOSITION_0:
-      case TrainingAction.PICK_PROPOSITION_1:
-      case TrainingAction.PICK_PROPOSITION_2:
-      case TrainingAction.PICK_PROPOSITION_3:
-      case TrainingAction.PICK_PROPOSITION_4:
-      case TrainingAction.PICK_PROPOSITION_5: {
-        const propositionIndex =
-          action - TrainingAction.PICK_PROPOSITION_0
-        return this.pickProposition(agent, propositionIndex)
-      }
-
-      default:
-        return false
+      return false // no other actions allowed during item proposition phase
     }
+
+    // BUY_0..BUY_5 (0-5)
+    if (action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5) {
+      return this.buyPokemon(agent, action - TrainingAction.BUY_0)
+    }
+    // REFRESH (6)
+    if (action === TrainingAction.REFRESH) return this.rerollShop(agent)
+    // LEVEL_UP (7)
+    if (action === TrainingAction.LEVEL_UP) return this.levelUp(agent)
+    // LOCK_SHOP (8)
+    if (action === TrainingAction.LOCK_SHOP) {
+      agent.shopLocked = !agent.shopLocked
+      return true
+    }
+    // END_TURN (9)
+    if (action === TrainingAction.END_TURN) return true
+    // MOVE_0..MOVE_31 (10-41)
+    if (action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31) {
+      const [x, y] = cellToXY(action - TrainingAction.MOVE_0)
+      return this.moveUnitToCell(agent, x, y)
+    }
+    // SELL_0..SELL_31 (42-73)
+    if (action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31) {
+      const [x, y] = cellToXY(action - TrainingAction.SELL_0)
+      return this.sellPokemonAtCell(agent, x, y)
+    }
+    // REMOVE_SHOP_0..5 (74-79)
+    if (action >= TrainingAction.REMOVE_SHOP_0 && action <= TrainingAction.REMOVE_SHOP_0 + 5) {
+      return this.removeFromShop(agent, action - TrainingAction.REMOVE_SHOP_0)
+    }
+    // PICK_0..PICK_5 (80-85)
+    if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
+      return this.pickProposition(agent, action - TrainingAction.PICK_0)
+    }
+    // COMBINE_0..5 (86-91)
+    if (action >= TrainingAction.COMBINE_0 && action <= TrainingAction.COMBINE_0 + 5) {
+      return this.combineItems(agent, action - TrainingAction.COMBINE_0)
+    }
+
+    return false
   }
 
   /**
@@ -469,6 +525,24 @@ export class TrainingEnv {
       }
     })
 
+    this.invalidatePlayerCaches(player.id)
+    return true
+  }
+
+  /**
+   * Pick an item from item-only propositions (item carousel, PVE rewards).
+   * When pokemonsProposition is empty but itemsProposition has items.
+   */
+  private pickItemProposition(player: Player, propositionIndex: number): boolean {
+    if (player.itemsProposition.length === 0) return false
+    if (propositionIndex >= player.itemsProposition.length) return false
+
+    const item = player.itemsProposition[propositionIndex]
+    if (item == null) return false
+
+    player.items.push(item)
+    player.itemsProposition.clear()
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -497,38 +571,32 @@ export class TrainingEnv {
     player.shop[shopIndex] = Pkm.DEFAULT
 
     this.room.checkEvolutionsAfterPokemonAcquired(this.agentId)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
-  private sellPokemonAtBench(player: Player, benchIndex: number): boolean {
-    // Find pokemon at bench position benchIndex
-    let targetPokemon: Pokemon | null = null
+  private sellPokemonAtCell(player: Player, x: number, y: number): boolean {
+    const targetPokemon = this.findPokemonAt(player, x, y)
+    if (!targetPokemon) return false
+
     let targetId: string | null = null
-
     player.board.forEach((pokemon, key) => {
-      if (pokemon.positionY === 0 && pokemon.positionX === benchIndex) {
-        targetPokemon = pokemon
-        targetId = key
-      }
+      if (pokemon === targetPokemon) targetId = key
     })
-
-    if (!targetPokemon || !targetId) return false
+    if (!targetId) return false
 
     player.board.delete(targetId)
-    this.state.shop.releasePokemon(
-      (targetPokemon as Pokemon).name,
-      player,
-      this.state
-    )
+    this.state.shop.releasePokemon(targetPokemon.name, player, this.state)
 
     const sellPrice = getSellPrice(targetPokemon, this.state.specialGameRule)
     player.addMoney(sellPrice, false, null)
-    ;(targetPokemon as Pokemon).items.forEach((it: Item) => {
+    targetPokemon.items.forEach((it: Item) => {
       player.items.push(it)
     })
 
     player.updateSynergies()
     player.boardSize = this.room.getTeamSize(player.board)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -542,6 +610,7 @@ export class TrainingEnv {
       player.shopFreeRolls--
     }
     this.state.shop.assignShop(player, true, this.state)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -552,6 +621,97 @@ export class TrainingEnv {
 
     player.addExperience(4)
     player.money -= cost
+    this.invalidatePlayerCaches(player.id)
+    return true
+  }
+
+  /**
+   * Find the "first available unit" by scanning bench left-to-right,
+   * then board rows top-to-bottom. Used by MOVE actions.
+   */
+  private findFirstAvailableUnit(player: Player): Pokemon | null {
+    // Scan bench left-to-right (y=0, x=0..7)
+    for (let x = 0; x < GRID_WIDTH; x++) {
+      const pokemon = this.findPokemonAt(player, x, 0)
+      if (pokemon) return pokemon
+    }
+    // Scan board row by row (y=1..3, x=0..7)
+    for (let y = 1; y < GRID_HEIGHT; y++) {
+      for (let x = 0; x < GRID_WIDTH; x++) {
+        const pokemon = this.findPokemonAt(player, x, y)
+        if (pokemon) return pokemon
+      }
+    }
+    return null
+  }
+
+  private moveUnitToCell(player: Player, targetX: number, targetY: number): boolean {
+    // Target must be empty
+    if (this.findPokemonAt(player, targetX, targetY)) return false
+
+    const pokemon = this.findFirstAvailableUnit(player)
+    if (!pokemon) return false
+
+    const sourceY = pokemon.positionY
+    const maxTeamSize = getMaxTeamSize(
+      player.experienceManager.level,
+      this.state.specialGameRule
+    )
+
+    // Moving bench → board: check board not full
+    if (targetY >= 1 && sourceY === 0) {
+      if (player.boardSize >= maxTeamSize) return false
+    }
+
+    pokemon.positionX = targetX
+    pokemon.positionY = targetY
+
+    // Update board size if crossing bench/board boundary
+    if (sourceY === 0 && targetY >= 1) {
+      player.boardSize++
+    } else if (sourceY >= 1 && targetY === 0) {
+      player.boardSize--
+    }
+
+    if (typeof pokemon.onChangePosition === "function") {
+      pokemon.onChangePosition(targetX, targetY, player, this.state)
+    }
+    player.updateSynergies()
+    this.invalidatePlayerCaches(player.id)
+    return true
+  }
+
+  private removeFromShop(player: Player, shopIndex: number): boolean {
+    const name = player.shop[shopIndex]
+    if (!name || name === Pkm.DEFAULT) return false
+
+    const cost = getBuyPrice(name, this.state.specialGameRule)
+    if (player.money < cost) return false
+
+    // DO NOT deduct gold — gold is a gate check only (matches real game)
+    player.shop[shopIndex] = Pkm.DEFAULT
+    player.shopLocked = true
+    this.state.shop.releasePokemon(name, player, this.state)
+    this.invalidatePlayerCaches(player.id)
+    return true
+  }
+
+  private combineItems(player: Player, pairIndex: number): boolean {
+    const items = Array.from(player.items.values()) as Item[]
+    const pairs = this.getCachedItemPairs(player.id, items)
+    if (pairIndex >= pairs.length) return false
+
+    const [i, j] = pairs[pairIndex]
+    const itemA = items[i]
+    const itemB = items[j]
+    const result = findRecipeResult(itemA, itemB)
+    if (!result) return false
+
+    // Remove higher index first to avoid shifting
+    player.items.splice(j, 1)
+    player.items.splice(i, 1)
+    player.items.push(result)
+    this.invalidatePlayerCaches(player.id)
     return true
   }
 
@@ -590,6 +750,7 @@ export class TrainingEnv {
       }
       player.updateSynergies()
       player.boardSize = this.room.getTeamSize(player.board)
+      this.invalidatePlayerCaches(player.id)
     }
   }
 
@@ -709,6 +870,16 @@ export class TrainingEnv {
       })
     }
 
+    // Capture initial enemy team sizes for kill counting (6.3)
+    const initialEnemySizes = new Map<string, number>()
+    this.state.players.forEach((player) => {
+      if (!player.alive) return
+      const sim = this.state.simulations.get(player.simulationId)
+      if (!sim) return
+      const enemyTeam = player.team === Team.BLUE_TEAM ? sim.redTeam : sim.blueTeam
+      initialEnemySizes.set(player.id, enemyTeam.size)
+    })
+
     // Run all simulations synchronously
     let steps = 0
     let allFinished = false
@@ -723,11 +894,27 @@ export class TrainingEnv {
       steps++
     }
 
-    // Force-finish any remaining simulations
+    // Force-finish any remaining simulations (split from stop for data extraction)
     this.state.simulations.forEach((simulation) => {
       if (!simulation.finished) {
         simulation.onFinish()
       }
+    })
+
+    // Extract enemy kill counts BEFORE stop() clears teams (6.3)
+    const enemyKills = new Map<string, number>()
+    this.state.players.forEach((player) => {
+      if (!player.alive) return
+      const sim = this.state.simulations.get(player.simulationId)
+      if (!sim) return
+      const enemyTeam = player.team === Team.BLUE_TEAM ? sim.redTeam : sim.blueTeam
+      const initial = initialEnemySizes.get(player.id) ?? 0
+      const surviving = enemyTeam.size
+      enemyKills.set(player.id, Math.max(0, initial - surviving))
+    })
+
+    // Now stop all simulations (clears teams)
+    this.state.simulations.forEach((simulation) => {
       simulation.stop()
     })
 
@@ -789,12 +976,69 @@ export class TrainingEnv {
       }
     })
 
+    // ── Shaped rewards (Phase 6) ──────────────────────────────────────
+
+    // 6.2: Synergy activation delta — reward positive synergy growth
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const currentThresholds = this.countActiveSynergyThresholds(player)
+      if (id === this.agentId) {
+        const delta = currentThresholds - this.prevActiveSynergyCount
+        if (delta > 0) {
+          rewards.set(id, (rewards.get(id) ?? 0) + delta * REWARD_SYNERGY_THRESHOLD)
+        }
+      }
+    })
+
+    // 6.3: Combat damage — reward enemy kills
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const kills = enemyKills.get(id) ?? 0
+      if (kills > 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + kills * REWARD_PER_ENEMY_KILL)
+      }
+    })
+
+    // 6.4: HP preservation — small bonus for winning with high HP
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const lastHistory = player.history.at(-1)
+      if (lastHistory?.result === BattleResult.WIN) {
+        rewards.set(id, (rewards.get(id) ?? 0) + (player.life / 100) * REWARD_HP_SCALE)
+      }
+    })
+
     // Track agent's last battle result for logging
     const agent = this.state.players.get(this.agentId)
     if (agent) {
       const lastHistory = agent.history.at(-1)
       if (lastHistory) {
         this.lastBattleResult = lastHistory.result as BattleResult
+      }
+    }
+
+    // PVE reward handling: auto-give direct rewards, set propositions for picks
+    if (isPVE) {
+      const pveStage = PVEStages[this.state.stageLevel]
+      if (pveStage) {
+        this.state.players.forEach((player) => {
+          if (!player.alive) return
+          const lastHist = player.history.at(-1)
+          if (lastHist?.result !== BattleResult.WIN) return
+
+          // Auto-give direct rewards (getRewards)
+          const directRewards = pveStage.getRewards?.(player) ?? []
+          directRewards.forEach((item) => player.items.push(item))
+
+          // Set reward propositions for agent to pick (getRewardsPropositions)
+          const rewardPropositions = pveStage.getRewardsPropositions?.(player) ?? []
+          if (rewardPropositions.length > 0 && !player.isBot) {
+            rewardPropositions.forEach((item) => player.itemsProposition.push(item))
+          } else if (rewardPropositions.length > 0 && player.isBot) {
+            // Bots auto-pick a random reward proposition
+            player.items.push(pickRandomIn(rewardPropositions))
+          }
+        })
       }
     }
 
@@ -813,6 +1057,20 @@ export class TrainingEnv {
         income += 5
         player.addMoney(income, true, null)
         player.addExperience(2)
+
+        // 6.1: Interest bonus with board guard — must field nearly full team
+        if (!player.isBot && player.interest > 0) {
+          const maxTeam = getMaxTeamSize(
+            player.experienceManager.level,
+            this.state.specialGameRule
+          )
+          if (player.boardSize >= maxTeam - 2) {
+            rewards.set(
+              player.id,
+              (rewards.get(player.id) ?? 0) + player.interest * REWARD_INTEREST_BONUS
+            )
+          }
+        }
       })
 
       // Update bot levels
@@ -831,6 +1089,11 @@ export class TrainingEnv {
     // Rank players
     this.room.rankPlayers()
 
+    // 7.2: Invalidate all caches after fight (board state changed)
+    this.state.players.forEach((_player, id) => {
+      this.invalidatePlayerCaches(id)
+    })
+
     return rewards
   }
 
@@ -848,7 +1111,7 @@ export class TrainingEnv {
       PortalCarouselStages.includes(this.state.stageLevel) &&
       this.state.stageLevel > 0
     ) {
-      // Agent gets propositions to choose from via PICK_PROPOSITION actions
+      // Agent gets propositions to choose from via PICK actions
       this.state.players.forEach((player) => {
         if (!player.isBot) {
           this.state.shop.assignUniquePropositions(player, this.state, [])
@@ -858,7 +1121,7 @@ export class TrainingEnv {
       this.autoPickPropositionsForBots()
     }
 
-    // Handle item carousel stages — give each alive player a random item
+    // Handle item carousel stages — present 3 random items as propositions
     if (ItemCarouselStages.includes(this.state.stageLevel)) {
       this.state.players.forEach((player) => {
         if (!player.isBot && player.alive) {
@@ -866,7 +1129,8 @@ export class TrainingEnv {
             this.state.stageLevel >= 20
               ? CraftableItemsNoScarves
               : ItemComponentsNoFossilOrScarf
-          player.items.push(pickRandomIn(itemPool))
+          const choices = pickNRandomIn(itemPool, 3)
+          choices.forEach((item) => player.itemsProposition.push(item))
         }
       })
     }
@@ -926,18 +1190,29 @@ export class TrainingEnv {
       }
     }
 
-    // Auto-pick for bots only; agent propositions stay pending for PICK_PROPOSITION actions
+    // Auto-pick for bots only; agent propositions stay pending for PICK actions
     this.autoPickPropositionsForBots()
+
+    // 7.2: Invalidate all caches after phase transition (shops, propositions changed)
+    this.state.players.forEach((_player, id) => {
+      this.invalidatePlayerCaches(id)
+    })
+
+    // Snapshot synergy count at start of pick phase for delta reward (6.2)
+    const agentForSynergy = this.state.players.get(this.agentId)
+    if (agentForSynergy) {
+      this.prevActiveSynergyCount = this.countActiveSynergyThresholds(agentForSynergy)
+    }
   }
 
   /**
    * Auto-pick pokemon and item propositions for bot players only.
-   * The RL agent picks via PICK_PROPOSITION actions instead.
+   * The RL agent picks via PICK actions instead.
    * Bots pick randomly, creates the pokemon, places on bench, gives item.
    */
   private autoPickPropositionsForBots(): void {
     this.state.players.forEach((player) => {
-      // Skip RL agents — they pick via PICK_PROPOSITION actions.
+      // Skip RL agents — they pick via PICK actions.
       // In self-play mode all players are non-bot, so this is a no-op.
       if (!player.isBot) return
       if (player.pokemonsProposition.length > 0) {
@@ -994,6 +1269,13 @@ export class TrainingEnv {
     // If propositions still there (pickProposition failed due to no space), force clear
     if (agent.pokemonsProposition.length > 0) {
       agent.pokemonsProposition.clear()
+      agent.itemsProposition.clear()
+    }
+    // Item-only propositions (item carousel, PVE rewards)
+    if (agent.itemsProposition.length > 0) {
+      const items = values(agent.itemsProposition)
+      const pick = pickRandomIn(items)
+      agent.items.push(pick)
       agent.itemsProposition.clear()
     }
   }
@@ -1111,127 +1393,19 @@ export class TrainingEnv {
    */
   getObservation(playerId?: string): number[] {
     const targetId = playerId ?? this.agentId
-    const obs: number[] = []
     const agent = this.state.players.get(targetId)
 
     if (!agent) {
       return new Array(TOTAL_OBS_SIZE).fill(0)
     }
 
-    // Player stats (8)
-    obs.push(agent.life / 100) // normalized
-    obs.push(agent.money / 100)
-    obs.push(agent.experienceManager.level / 9)
-    obs.push(agent.streak / 10)
-    obs.push(agent.interest / 5)
-    obs.push(agent.alive ? 1 : 0)
-    obs.push(agent.rank / 8)
-    obs.push(agent.boardSize / 9)
-
-    // Shop (5 slots, encoded as pokemon rarity 0-1)
-    for (let i = 0; i < 5; i++) {
-      const pkm = agent.shop[i]
-      if (pkm && pkm !== Pkm.DEFAULT) {
-        const data = getPokemonData(pkm)
-        const rarityMap: Record<string, number> = {
-          [Rarity.COMMON]: 0.1,
-          [Rarity.UNCOMMON]: 0.2,
-          [Rarity.RARE]: 0.4,
-          [Rarity.EPIC]: 0.6,
-          [Rarity.ULTRA]: 0.8,
-          [Rarity.UNIQUE]: 0.9,
-          [Rarity.LEGENDARY]: 1.0,
-          [Rarity.HATCH]: 0.3,
-          [Rarity.SPECIAL]: 0.5
-        }
-        obs.push(rarityMap[data.rarity] ?? 0)
-      } else {
-        obs.push(0)
-      }
+    // 7.2: Return cached observation if still valid
+    if (!this.observationDirty.has(targetId) && this.observationCache.has(targetId)) {
+      return this.observationCache.get(targetId)!
     }
 
-    // Board/bench (40 slots * 3 features = 120)
-    // Bench: 8 positions (y=0, x=0..7)
-    for (let x = 0; x < 8; x++) {
-      const pokemon = this.findPokemonAt(agent, x, 0)
-      if (pokemon) {
-        const data = getPokemonData(pokemon.name)
-        const rarityMap: Record<string, number> = {
-          [Rarity.COMMON]: 0.1,
-          [Rarity.UNCOMMON]: 0.2,
-          [Rarity.RARE]: 0.4,
-          [Rarity.EPIC]: 0.6,
-          [Rarity.ULTRA]: 0.8,
-          [Rarity.UNIQUE]: 0.9,
-          [Rarity.LEGENDARY]: 1.0,
-          [Rarity.HATCH]: 0.3,
-          [Rarity.SPECIAL]: 0.5
-        }
-        obs.push(1) // has pokemon
-        obs.push(pokemon.stars / 3)
-        obs.push(rarityMap[data.rarity] ?? 0)
-      } else {
-        obs.push(0, 0, 0)
-      }
-    }
+    const obs: number[] = []
 
-    // Board: 4x8 = 32 positions (y=1..4, x=0..7)
-    for (let y = 1; y <= 4; y++) {
-      for (let x = 0; x < 8; x++) {
-        const pokemon = this.findPokemonAt(agent, x, y)
-        if (pokemon) {
-          const data = getPokemonData(pokemon.name)
-          const rarityMap: Record<string, number> = {
-            [Rarity.COMMON]: 0.1,
-            [Rarity.UNCOMMON]: 0.2,
-            [Rarity.RARE]: 0.4,
-            [Rarity.EPIC]: 0.6,
-            [Rarity.ULTRA]: 0.8,
-            [Rarity.UNIQUE]: 0.9,
-            [Rarity.LEGENDARY]: 1.0,
-            [Rarity.HATCH]: 0.3,
-            [Rarity.SPECIAL]: 0.5
-          }
-          obs.push(1)
-          obs.push(pokemon.stars / 3)
-          obs.push(rarityMap[data.rarity] ?? 0)
-        } else {
-          obs.push(0, 0, 0)
-        }
-      }
-    }
-
-    // Synergies (32 values, normalized)
-    for (const synergy of SynergyArray) {
-      const val = agent.synergies.get(synergy) ?? 0
-      obs.push(val / 10) // normalize
-    }
-
-    // Game info (4)
-    obs.push(this.state.stageLevel / 50)
-    obs.push(this.state.phase / 2)
-    const playersAlive = values(this.state.players).filter(
-      (p) => p.alive
-    ).length
-    obs.push(playersAlive / 8)
-    obs.push(agent.pokemonsProposition.length > 0 ? 1 : 0) // hasPropositions
-
-    // Opponent stats (16 = 8 opponents * 2 features)
-    const opponents = values(this.state.players).filter(
-      (p) => p.id !== targetId
-    )
-    for (let i = 0; i < 8; i++) {
-      if (i < opponents.length) {
-        obs.push(opponents[i].life / 100)
-        obs.push(opponents[i].rank / 8)
-      } else {
-        obs.push(0, 0)
-      }
-    }
-
-    // Proposition slots (6 slots × 3 features = 18)
-    // Each slot: rarity, numTypes, hasItem
-    const propositions = values(agent.pokemonsProposition) as Pkm[]
     const rarityMap: Record<string, number> = {
       [Rarity.COMMON]: 0.1,
       [Rarity.UNCOMMON]: 0.2,
@@ -1243,26 +1417,195 @@ export class TrainingEnv {
       [Rarity.HATCH]: 0.3,
       [Rarity.SPECIAL]: 0.5
     }
-    for (let i = 0; i < MAX_PROPOSITIONS; i++) {
-      if (i < propositions.length && propositions[i]) {
-        const data = getPokemonData(propositions[i])
+
+    // ── Player stats (14) ──────────────────────────────────────────────
+    obs.push(agent.life / 100)
+    obs.push(agent.money / 100)
+    obs.push(agent.experienceManager.level / 9)
+    obs.push(agent.streak / 10)
+    obs.push(agent.interest / 5)
+    obs.push(agent.alive ? 1 : 0)
+    obs.push(agent.rank / 8)
+    obs.push(agent.boardSize / 9)
+    obs.push((agent.experienceManager.expNeeded ?? 0) / 32)
+    obs.push((agent.shopFreeRolls ?? 0) / 3)
+    obs.push((agent.rerollCount ?? 0) / 20)
+    obs.push(agent.shopLocked ? 1 : 0)
+    obs.push((agent.totalMoneyEarned ?? 0) / 200)
+    obs.push((agent.totalPlayerDamageDealt ?? 0) / 100)
+
+    // ── Shop (6 slots × 9 features = 54) ───────────────────────────────
+    for (let i = 0; i < 6; i++) {
+      const pkm = agent.shop[i]
+      if (pkm && pkm !== Pkm.DEFAULT) {
+        const data = getPokemonData(pkm)
+        const types = data.types ?? []
+        // Count copies on bench/board for evolution check
+        let copyCount = 0
+        agent.board.forEach((p) => {
+          if (p.name === pkm) copyCount++
+        })
+        obs.push(1) // hasUnit
+        obs.push(getPkmSpeciesIndex(pkm)) // speciesIndex
         obs.push(rarityMap[data.rarity] ?? 0) // rarity
-        obs.push((data.types?.length ?? 0) / 5) // numTypes normalized
+        obs.push(getBuyPrice(pkm, this.state.specialGameRule) / 10) // cost
+        obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
+        obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
+        obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+        obs.push(0) // type4 (always 0, no items on shop pokemon)
+        obs.push(copyCount >= 2 ? 1 : 0) // isEvoPossible
+      } else {
+        obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0) // 9 zeros
+      }
+    }
+
+    // ── Board (32 cells × 12 features = 384) ──────────────────────────
+    // Grid: y=0 bench, y=1-3 board. Cell = y*8+x.
+    for (let y = 0; y < GRID_HEIGHT; y++) {
+      for (let x = 0; x < GRID_WIDTH; x++) {
+        const pokemon = this.findPokemonAt(agent, x, y)
+        if (pokemon) {
+          const data = getPokemonData(pokemon.name)
+          const types = Array.from(pokemon.types.values()) as Synergy[]
+          obs.push(1) // hasUnit
+          obs.push(getPkmSpeciesIndex(pokemon.name)) // speciesIndex
+          obs.push(pokemon.stars / 3) // stars
+          obs.push(rarityMap[data.rarity] ?? 0) // rarity
+          obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
+          obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
+          obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+          obs.push(0) // type4 (stone types only during simulation)
+          obs.push(pokemon.atk / 50) // atk
+          obs.push(pokemon.hp / 500) // hp
+          obs.push(pokemon.range / 4) // range
+          obs.push(pokemon.items.size / 3) // numItems
+        } else {
+          obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 12 zeros
+        }
+      }
+    }
+
+    // ── Held items (10) ────────────────────────────────────────────────
+    const heldItems = Array.from(agent.items.values()) as Item[]
+    for (let i = 0; i < OBS_HELD_ITEMS; i++) {
+      if (i < heldItems.length) {
+        obs.push(getItemIndex(heldItems[i]))
+      } else {
+        obs.push(0)
+      }
+    }
+
+    // ── Synergies (31 values, normalized) ─────────────────────────────
+    for (const synergy of SynergyArray) {
+      const val = agent.synergies.get(synergy) ?? 0
+      obs.push(val / 10)
+    }
+
+    // ── Game info (7) ──────────────────────────────────────────────────
+    obs.push(this.state.stageLevel / 50)
+    obs.push(this.state.phase / 2)
+    const playersAlive = values(this.state.players).filter(
+      (p) => p.alive
+    ).length
+    obs.push(playersAlive / 8)
+    obs.push(
+      agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0
+        ? 1
+        : 0
+    ) // hasPropositions
+    obs.push(
+      this.state.weather
+        ? getWeatherIndex(this.state.weather as Weather)
+        : 0
+    ) // weatherIndex
+    obs.push(this.state.stageLevel in PVEStages ? 1 : 0) // isPVE
+    obs.push(
+      getMaxTeamSize(
+        agent.experienceManager.level,
+        this.state.specialGameRule
+      ) / 9
+    ) // maxTeamSize
+
+    // ── Opponents (7 × 10 features = 70) ──────────────────────────────
+    const opponents = values(this.state.players).filter(
+      (p) => p.id !== targetId && p.alive
+    )
+    for (let i = 0; i < OBS_OPPONENT_COUNT; i++) {
+      if (i < opponents.length) {
+        const opp = opponents[i]
+        obs.push(opp.life / 100)
+        obs.push(opp.rank / 8)
+        obs.push(opp.experienceManager.level / 9)
+        obs.push(opp.money / 100)
+        obs.push(opp.streak / 10)
+        obs.push(opp.boardSize / 9)
+        // Top 2 synergies by count
+        let top1Syn: Synergy | null = null
+        let top1Count = 0
+        let top2Syn: Synergy | null = null
+        let top2Count = 0
+        opp.synergies.forEach((count, syn) => {
+          if (count > top1Count) {
+            top2Syn = top1Syn
+            top2Count = top1Count
+            top1Syn = syn as Synergy
+            top1Count = count
+          } else if (count > top2Count) {
+            top2Syn = syn as Synergy
+            top2Count = count
+          }
+        })
+        obs.push(top1Syn ? getSynergyIndex(top1Syn) : 0)
+        obs.push(top1Count / 10)
+        obs.push(top2Syn ? getSynergyIndex(top2Syn) : 0)
+        obs.push(top2Count / 10)
+      } else {
+        obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 10 zeros
+      }
+    }
+
+    // ── Propositions (6 × 7 features = 42) ─────────────────────────────
+    const propositions = values(agent.pokemonsProposition) as Pkm[]
+    const itemOnlyPropositions = propositions.length === 0 && agent.itemsProposition.length > 0
+    for (let i = 0; i < OBS_PROPOSITION_SLOTS; i++) {
+      if (itemOnlyPropositions && i < agent.itemsProposition.length) {
+        // Item-only propositions (item carousel, PVE rewards):
+        // speciesIndex=0, rarity=0, types=0, last feature = item index
+        obs.push(0) // speciesIndex (no pokemon)
+        obs.push(0) // rarity
+        obs.push(0) // type1
+        obs.push(0) // type2
+        obs.push(0) // type3
+        obs.push(0) // type4
+        obs.push(getItemIndex(agent.itemsProposition[i])) // itemIndex
+      } else if (i < propositions.length && propositions[i]) {
+        const data = getPokemonData(propositions[i])
+        const types = data.types ?? []
+        obs.push(getPkmSpeciesIndex(propositions[i])) // speciesIndex
+        obs.push(rarityMap[data.rarity] ?? 0) // rarity
+        obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
+        obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
+        obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+        obs.push(0) // type4
         obs.push(
           agent.itemsProposition.length > i &&
             agent.itemsProposition[i] != null
-            ? 1
+            ? getItemIndex(agent.itemsProposition[i])
             : 0
-        ) // hasItem
+        ) // itemIndex (0 if no paired item)
       } else {
-        obs.push(0, 0, 0)
+        obs.push(0, 0, 0, 0, 0, 0, 0) // 7 zeros
       }
     }
 
     // Pad to exact size if needed
     while (obs.length < TOTAL_OBS_SIZE) obs.push(0)
 
-    return obs.slice(0, TOTAL_OBS_SIZE)
+    const result = obs.slice(0, TOTAL_OBS_SIZE)
+    // 7.2: Cache the observation
+    this.observationCache.set(targetId, result)
+    this.observationDirty.delete(targetId)
+    return result
   }
 
   /**
@@ -1279,7 +1622,7 @@ export class TrainingEnv {
       return mask
     }
 
-    // If agent has propositions pending, only PICK_PROPOSITION actions are valid
+    // If agent has pokemon propositions pending, only PICK actions are valid
     if (agent.pokemonsProposition.length > 0) {
       const freeSpace = getFreeSpaceOnBench(agent.board)
       for (let i = 0; i < agent.pokemonsProposition.length; i++) {
@@ -1297,7 +1640,7 @@ export class TrainingEnv {
             ? PkmDuos[pkm as PkmDuo].length
             : 1
         if (freeSpace >= numNeeded || isEvolution) {
-          mask[TrainingAction.PICK_PROPOSITION_0 + i] = 1
+          mask[TrainingAction.PICK_0 + i] = 1
         }
       }
       // If no proposition is valid (bench full, no evolution), allow END_TURN as fallback
@@ -1307,12 +1650,25 @@ export class TrainingEnv {
       return mask
     }
 
+    // Item-only propositions (item carousel, PVE rewards)
+    if (agent.itemsProposition.length > 0) {
+      for (let i = 0; i < agent.itemsProposition.length; i++) {
+        if (agent.itemsProposition[i] != null) {
+          mask[TrainingAction.PICK_0 + i] = 1
+        }
+      }
+      return mask
+    }
+
     // Normal PICK phase: economy actions
     // END_TURN is always valid
     mask[TrainingAction.END_TURN] = 1
 
-    // BUY actions
-    for (let i = 0; i < 5; i++) {
+    // LOCK_SHOP — always valid during normal shop phase
+    mask[TrainingAction.LOCK_SHOP] = 1
+
+    // BUY actions (all 6 shop slots)
+    for (let i = 0; i < 6; i++) {
       const pkm = agent.shop[i]
       if (pkm && pkm !== Pkm.DEFAULT) {
         const cost = getBuyPrice(pkm, this.state.specialGameRule)
@@ -1323,23 +1679,63 @@ export class TrainingEnv {
       }
     }
 
-    // SELL actions (bench positions 0-7)
-    for (let x = 0; x < 8; x++) {
-      const pokemon = this.findPokemonAt(agent, x, 0)
-      if (pokemon) {
-        mask[TrainingAction.SELL_0 + x] = 1
+    // SELL actions — all 32 grid cells
+    for (let cell = 0; cell < GRID_CELLS; cell++) {
+      const [x, y] = cellToXY(cell)
+      if (this.findPokemonAt(agent, x, y)) {
+        mask[TrainingAction.SELL_0 + cell] = 1
       }
     }
 
-    // REROLL
+    // MOVE actions — empty cells that a unit could move to
+    const firstUnit = this.findFirstAvailableUnit(agent)
+    if (firstUnit) {
+      const sourceY = firstUnit.positionY
+      const maxTeamSize = getMaxTeamSize(
+        agent.experienceManager.level,
+        this.state.specialGameRule
+      )
+      for (let cell = 0; cell < GRID_CELLS; cell++) {
+        const [x, y] = cellToXY(cell)
+        if (this.findPokemonAt(agent, x, y)) continue // occupied
+        // Bench → board: only valid if board not full
+        if (y >= 1 && sourceY === 0 && agent.boardSize >= maxTeamSize) continue
+        mask[TrainingAction.MOVE_0 + cell] = 1
+      }
+    }
+
+    // REFRESH
     const rollCost = agent.shopFreeRolls > 0 ? 0 : 1
     if (agent.money >= rollCost) {
-      mask[TrainingAction.REROLL] = 1
+      mask[TrainingAction.REFRESH] = 1
     }
 
     // LEVEL_UP
     if (agent.money >= 4 && agent.experienceManager.canLevelUp()) {
       mask[TrainingAction.LEVEL_UP] = 1
+    }
+
+    // REMOVE_SHOP — valid if slot has a pokemon and player can afford it (gold is gate only)
+    for (let i = 0; i < 6; i++) {
+      const pkm = agent.shop[i]
+      if (pkm && pkm !== Pkm.DEFAULT) {
+        const cost = getBuyPrice(pkm, this.state.specialGameRule)
+        if (agent.money >= cost) {
+          mask[TrainingAction.REMOVE_SHOP_0 + i] = 1
+        }
+      }
+    }
+
+    // COMBINE — valid pairs of held items that form a recipe
+    if (agent.items.length >= 2) {
+      const items = Array.from(agent.items.values()) as Item[]
+      const pairs = this.getCachedItemPairs(targetId, items)
+      for (let p = 0; p < pairs.length; p++) {
+        const [i, j] = pairs[p]
+        if (findRecipeResult(items[i], items[j])) {
+          mask[TrainingAction.COMBINE_0 + p] = 1
+        }
+      }
     }
 
     return mask
@@ -1350,13 +1746,63 @@ export class TrainingEnv {
     x: number,
     y: number
   ): Pokemon | null {
-    let found: Pokemon | null = null
+    const grid = this.getPositionGrid(player)
+    const cellKey = y * GRID_WIDTH + x
+    return grid.get(cellKey) ?? null
+  }
+
+  /**
+   * 7.2: Build or return cached position grid for a player.
+   * Maps cell index (y*8+x) → Pokemon for O(1) lookups.
+   */
+  private getPositionGrid(player: Player): Map<number, Pokemon> {
+    if (!this.positionGridDirty.has(player.id) && this.positionGridCache.has(player.id)) {
+      return this.positionGridCache.get(player.id)!
+    }
+    const grid = new Map<number, Pokemon>()
     player.board.forEach((pokemon) => {
-      if (pokemon.positionX === x && pokemon.positionY === y) {
-        found = pokemon
+      const cellKey = pokemon.positionY * GRID_WIDTH + pokemon.positionX
+      grid.set(cellKey, pokemon)
+    })
+    this.positionGridCache.set(player.id, grid)
+    this.positionGridDirty.delete(player.id)
+    return grid
+  }
+
+  /**
+   * 7.2: Invalidate position grid and observation cache for a player.
+   * Call after any board mutation (buy, sell, move, evolution, etc.).
+   */
+  private invalidatePlayerCaches(playerId: string): void {
+    this.positionGridDirty.add(playerId)
+    this.observationDirty.add(playerId)
+    this.itemPairCache.delete(playerId)
+  }
+
+  /**
+   * 7.2: Return cached item pairs for a player, recomputing only when invalidated.
+   */
+  private getCachedItemPairs(playerId: string, items: Item[]): [number, number][] {
+    const cached = this.itemPairCache.get(playerId)
+    if (cached) return cached
+    const pairs = enumerateItemPairs(items as string[])
+    this.itemPairCache.set(playerId, pairs)
+    return pairs
+  }
+
+  /**
+   * Count how many synergies have reached their first activation threshold.
+   * Used for delta-based synergy reward shaping.
+   */
+  private countActiveSynergyThresholds(player: Player): number {
+    let count = 0
+    player.synergies.forEach((value, synergy) => {
+      const triggers = SynergyTriggers[synergy as Synergy]
+      if (triggers && triggers.length > 0 && value >= triggers[0]) {
+        count++
       }
     })
-    return found
+    return count
   }
 
   private computeFinalReward(agent: Player): number {
@@ -1367,6 +1813,15 @@ export class TrainingEnv {
   private getInfo(playerId?: string): StepResult["info"] {
     const targetId = playerId ?? this.agentId
     const agent = this.state.players.get(targetId)
+
+    // Count active synergies (entries with count > 0)
+    let synergyCount = 0
+    if (agent) {
+      agent.synergies.forEach((count) => {
+        if (count > 0) synergyCount++
+      })
+    }
+
     return {
       stage: this.state.stageLevel,
       phase:
@@ -1381,7 +1836,11 @@ export class TrainingEnv {
       actionsThisTurn: SELF_PLAY
         ? (this.actionsPerPlayer.get(targetId) ?? 0)
         : this.actionsThisTurn,
-      actionMask: this.getActionMask(targetId)
+      actionMask: this.getActionMask(targetId),
+      gold: agent?.money ?? 0,
+      boardSize: agent?.boardSize ?? 0,
+      synergyCount,
+      itemsHeld: agent?.items.length ?? 0
     }
   }
 
@@ -1490,12 +1949,12 @@ export class TrainingEnv {
       // Handle proposition picking (stage 0 starters, uniques, additionals)
       if (player.pokemonsProposition.length > 0) {
         if (
-          action >= TrainingAction.PICK_PROPOSITION_0 &&
-          action <= TrainingAction.PICK_PROPOSITION_5
+          action >= TrainingAction.PICK_0 &&
+          action <= TrainingAction.PICK_0 + 5
         ) {
           this.pickProposition(
             player,
-            action - TrainingAction.PICK_PROPOSITION_0
+            action - TrainingAction.PICK_0
           )
           // Don't count proposition picks toward turn end — player continues shopping
           continue
@@ -1503,6 +1962,23 @@ export class TrainingEnv {
         // Non-proposition action during propositions (END_TURN fallback when
         // bench is full and no proposition can be picked). Fall through to
         // normal action processing so the turn-end logic can handle it.
+      }
+
+      // Item-only propositions (item carousel, PVE rewards)
+      if (player.pokemonsProposition.length === 0 && player.itemsProposition.length > 0) {
+        if (
+          action >= TrainingAction.PICK_0 &&
+          action <= TrainingAction.PICK_0 + 5
+        ) {
+          this.pickItemProposition(
+            player,
+            action - TrainingAction.PICK_0
+          )
+          // Don't count item picks toward turn end — player continues shopping
+          continue
+        }
+        // Shouldn't happen (mask only allows PICK during item propositions),
+        // but fall through to normal processing as safety
       }
 
       // Execute normal PICK phase action
@@ -1518,12 +1994,40 @@ export class TrainingEnv {
         this.turnEnded.set(playerId, true)
 
         // Safety: auto-resolve any pending propositions
-        if (player.pokemonsProposition.length > 0) {
+        if (player.pokemonsProposition.length > 0 || player.itemsProposition.length > 0) {
           this.autoPickForAgent(player)
         }
 
         // Auto-place team on board
-        this.autoPlaceTeam(player)
+        if (TRAINING_AUTO_PLACE) {
+          this.autoPlaceTeam(player)
+        }
+      }
+    }
+
+    // 7.1: Bench penalty for all alive RL players at turn end (batch path)
+    const benchPenalties = new Map<string, number>()
+    if (!TRAINING_AUTO_PLACE) {
+      for (let i = 0; i < this.playerIds.length; i++) {
+        const playerId = this.playerIds[i]
+        if (!this.turnEnded.get(playerId)) continue
+        const player = this.state.players.get(playerId)!
+        if (!player.alive) continue
+        const maxTeamSize = getMaxTeamSize(
+          player.experienceManager.level,
+          this.state.specialGameRule
+        )
+        if (player.boardSize < maxTeamSize) {
+          let benchCount = 0
+          player.board.forEach((p) => {
+            if (isOnBench(p)) benchCount++
+          })
+          if (benchCount > 0) {
+            const openSlots = maxTeamSize - player.boardSize
+            const penaltyUnits = Math.min(benchCount, openSlots)
+            benchPenalties.set(playerId, penaltyUnits * REWARD_BENCH_PENALTY)
+          }
+        }
       }
     }
 
@@ -1576,9 +2080,12 @@ export class TrainingEnv {
       let reward = 0
       let done = false
 
+      // 7.1: Add bench penalty (computed before fight)
+      reward += benchPenalties.get(id) ?? 0
+
       if (fightTriggered) {
         // Issue #2: ALL players get their combat reward
-        reward = perPlayerRewards.get(id) ?? 0
+        reward += perPlayerRewards.get(id) ?? 0
 
         if (this.state.gameFinished) {
           reward += this.computeFinalReward(player)

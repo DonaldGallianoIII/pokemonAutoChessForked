@@ -1,7 +1,9 @@
 """
 PPO Training Script for Pokemon Auto Chess
 
-Trains a PPO agent using stable-baselines3 with action masking.
+Trains a MaskablePPO agent using sb3-contrib with native action masking.
+The environment exposes 92 discrete actions and 612 observation features,
+aligned 1:1 with the agent-io browser extension API.
 
 Prerequisites:
   1. Start the TypeScript training server:
@@ -16,10 +18,12 @@ The agent learns to:
   - Build team compositions (synergy optimization)
   - Level up at the right time (tempo decisions)
   - Sell underperforming units (resource recycling)
+  - Pick item/pokemon propositions (carousel & PVE rewards)
+  - Combine items, move units, lock/unlock shop
 
 Architecture:
-  The PPO policy uses a small MLP (64x64) which is appropriate for the
-  ~150-dimensional observation space and 16 discrete actions.
+  MaskablePPO with 256×256 MLP. Native action masking via env.action_masks().
+  612 input features → 256 → 256 → 92 actions.
 """
 
 import argparse
@@ -29,26 +33,14 @@ from typing import Optional
 
 import numpy as np
 import requests
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
 from stable_baselines3.common.callbacks import (
     BaseCallback,
     CheckpointCallback,
-    EvalCallback,
 )
 from stable_baselines3.common.monitor import Monitor
 
 from pac_env import PokemonAutoChessEnv
-
-
-class ActionMaskCallback(BaseCallback):
-    """
-    Callback that applies action masking during training.
-    Invalid actions are masked out by setting their log probabilities
-    to -inf before sampling.
-    """
-
-    def _on_step(self) -> bool:
-        return True
 
 
 class TrainingMetricsCallback(BaseCallback):
@@ -67,6 +59,10 @@ class TrainingMetricsCallback(BaseCallback):
         self.episode_lengths = []
         self.episode_ranks = []
         self.episode_stages = []
+        self.episode_gold = []
+        self.episode_board_size = []
+        self.episode_synergy_count = []
+        self.episode_items_held = []
         self._total_episodes = 0
 
     def _on_step(self) -> bool:
@@ -81,6 +77,15 @@ class TrainingMetricsCallback(BaseCallback):
                 self.episode_ranks.append(info["rank"])
             if "stage" in info:
                 self.episode_stages.append(info["stage"])
+            # Terminal step metrics (logged when done=True)
+            if "gold" in info:
+                self.episode_gold.append(info["gold"])
+            if "boardSize" in info:
+                self.episode_board_size.append(info["boardSize"])
+            if "synergyCount" in info:
+                self.episode_synergy_count.append(info["synergyCount"])
+            if "itemsHeld" in info:
+                self.episode_items_held.append(info["itemsHeld"])
 
         # Log every 10 episodes
         if len(self.episode_rewards) >= 10:
@@ -105,6 +110,26 @@ class TrainingMetricsCallback(BaseCallback):
                 self.logger.record(
                     "training/mean_final_stage",
                     np.mean(self.episode_stages[-10:]),
+                )
+            if self.episode_gold:
+                self.logger.record(
+                    "training/mean_gold",
+                    np.mean(self.episode_gold[-10:]),
+                )
+            if self.episode_board_size:
+                self.logger.record(
+                    "training/mean_board_size",
+                    np.mean(self.episode_board_size[-10:]),
+                )
+            if self.episode_synergy_count:
+                self.logger.record(
+                    "training/synergy_count",
+                    np.mean(self.episode_synergy_count[-10:]),
+                )
+            if self.episode_items_held:
+                self.logger.record(
+                    "training/items_held",
+                    np.mean(self.episode_items_held[-10:]),
                 )
             self.logger.record("training/total_episodes", self._total_episodes)
 
@@ -154,20 +179,20 @@ def train(
     server_url: str = "http://localhost:9100",
     total_timesteps: int = 500_000,
     learning_rate: float = 3e-4,
-    n_steps: int = 512,
-    batch_size: int = 64,
+    n_steps: int = 1024,
+    batch_size: int = 128,
     n_epochs: int = 10,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     clip_range: float = 0.2,
-    ent_coef: float = 0.01,
+    ent_coef: float = 0.02,
     save_dir: str = "training/checkpoints",
     log_dir: str = "training/logs",
     resume_from: Optional[str] = None,
     phase: str = "A",
 ):
     """
-    Train a PPO agent on Pokemon Auto Chess.
+    Train a MaskablePPO agent on Pokemon Auto Chess.
 
     Args:
         server_url: URL of the TypeScript training server
@@ -191,8 +216,7 @@ def train(
     os.makedirs(log_dir, exist_ok=True)
 
     # Checkpoint prefix encodes phase + action space for rollback clarity.
-    # e.g. "phaseA_22act", "phaseB_22act", "phaseB_92act"
-    checkpoint_prefix = f"phase{phase}_22act"
+    checkpoint_prefix = f"phase{phase}_92act"
 
     # Wait for server
     wait_for_server(server_url)
@@ -206,10 +230,10 @@ def train(
     # Create or load model
     if resume_from and os.path.exists(resume_from):
         print(f"Resuming from checkpoint: {resume_from}")
-        model = PPO.load(resume_from, env=env)
+        model = MaskablePPO.load(resume_from, env=env)
     else:
-        print("Creating new PPO model...")
-        model = PPO(
+        print("Creating new MaskablePPO model...")
+        model = MaskablePPO(
             "MlpPolicy",
             env,
             learning_rate=learning_rate,
@@ -223,7 +247,7 @@ def train(
             verbose=1,
             tensorboard_log=log_dir,
             policy_kwargs=dict(
-                net_arch=dict(pi=[128, 128], vf=[128, 128])
+                net_arch=dict(pi=[256, 256], vf=[256, 256])
             ),
         )
 
@@ -266,7 +290,7 @@ def train(
 def evaluate(model_path: str, server_url: str, n_games: int = 20):
     """Evaluate a trained model over multiple games."""
     env = make_env(server_url)
-    model = PPO.load(model_path)
+    model = MaskablePPO.load(model_path)
 
     ranks = []
     rewards = []
@@ -278,7 +302,8 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
         done = False
 
         while not done:
-            action, _ = model.predict(obs, deterministic=True)
+            action_masks = env.action_masks()
+            action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
             done = terminated or truncated
@@ -304,9 +329,9 @@ if __name__ == "__main__":
     parser.add_argument("--server-url", default="http://localhost:9100", help="Training server URL")
     parser.add_argument("--timesteps", type=int, default=500_000, help="Total training timesteps")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--batch-size", type=int, default=64, help="Batch size")
-    parser.add_argument("--n-steps", type=int, default=512, help="Steps per rollout")
-    parser.add_argument("--ent-coef", type=float, default=0.01, help="Entropy coefficient")
+    parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
+    parser.add_argument("--n-steps", type=int, default=1024, help="Steps per rollout")
+    parser.add_argument("--ent-coef", type=float, default=0.02, help="Entropy coefficient")
     parser.add_argument("--save-dir", default="training/checkpoints", help="Checkpoint directory")
     parser.add_argument("--log-dir", default="training/logs", help="TensorBoard log directory")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint path")
