@@ -57,6 +57,11 @@ import { values } from "../utils/schemas"
 import { HeadlessRoom } from "./headless-room"
 import {
   cellToXY,
+  enumerateItemPairs,
+  findRecipeResult,
+  GRID_CELLS,
+  GRID_HEIGHT,
+  GRID_WIDTH,
   MAX_PROPOSITIONS,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
@@ -69,6 +74,7 @@ import {
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
+  TRAINING_AUTO_PLACE,
   TRAINING_MAX_ACTIONS_PER_TURN,
   TRAINING_MAX_FIGHT_STEPS,
   TRAINING_NUM_OPPONENTS,
@@ -303,7 +309,9 @@ export class TrainingEnv {
         }
 
         // Auto-place pokemon on board if there's room
-        this.autoPlaceTeam(agent)
+        if (TRAINING_AUTO_PLACE) {
+          this.autoPlaceTeam(agent)
+        }
 
         // Run the fight phase synchronously
         // Issue #2: runFightPhase returns per-player rewards so all players
@@ -345,36 +353,43 @@ export class TrainingEnv {
       return false // no other actions allowed during proposition phase
     }
 
-    // BUY_0..BUY_4 (0-4)
-    if (action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_0 + 4) {
+    // BUY_0..BUY_5 (0-5)
+    if (action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5) {
       return this.buyPokemon(agent, action - TrainingAction.BUY_0)
     }
-    // BUY_5 (5) — no-op until Phase 2.2 (6th shop slot)
-    if (action === TrainingAction.BUY_5) return false
     // REFRESH (6)
     if (action === TrainingAction.REFRESH) return this.rerollShop(agent)
     // LEVEL_UP (7)
     if (action === TrainingAction.LEVEL_UP) return this.levelUp(agent)
-    // LOCK_SHOP (8) — no-op until Phase 2.1
-    if (action === TrainingAction.LOCK_SHOP) return false
+    // LOCK_SHOP (8)
+    if (action === TrainingAction.LOCK_SHOP) {
+      agent.shopLocked = !agent.shopLocked
+      return true
+    }
     // END_TURN (9)
     if (action === TrainingAction.END_TURN) return true
-    // MOVE_0..MOVE_31 (10-41) — no-op until Phase 2.4
-    if (action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31) return false
-    // SELL_0..SELL_31 (42-73): bench sells (y=0) work, board sells (y>0) are no-ops
+    // MOVE_0..MOVE_31 (10-41)
+    if (action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31) {
+      const [x, y] = cellToXY(action - TrainingAction.MOVE_0)
+      return this.moveUnitToCell(agent, x, y)
+    }
+    // SELL_0..SELL_31 (42-73)
     if (action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31) {
       const [x, y] = cellToXY(action - TrainingAction.SELL_0)
-      if (y === 0) return this.sellPokemonAtBench(agent, x)
-      return false // board cell sells — no-op until Phase 2.3
+      return this.sellPokemonAtCell(agent, x, y)
     }
-    // REMOVE_SHOP_0..5 (74-79) — no-op until Phase 2.5
-    if (action >= TrainingAction.REMOVE_SHOP_0 && action <= TrainingAction.REMOVE_SHOP_0 + 5) return false
+    // REMOVE_SHOP_0..5 (74-79)
+    if (action >= TrainingAction.REMOVE_SHOP_0 && action <= TrainingAction.REMOVE_SHOP_0 + 5) {
+      return this.removeFromShop(agent, action - TrainingAction.REMOVE_SHOP_0)
+    }
     // PICK_0..PICK_5 (80-85)
     if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
       return this.pickProposition(agent, action - TrainingAction.PICK_0)
     }
-    // COMBINE_0..5 (86-91) — no-op until Phase 2.6
-    if (action >= TrainingAction.COMBINE_0 && action <= TrainingAction.COMBINE_0 + 5) return false
+    // COMBINE_0..5 (86-91)
+    if (action >= TrainingAction.COMBINE_0 && action <= TrainingAction.COMBINE_0 + 5) {
+      return this.combineItems(agent, action - TrainingAction.COMBINE_0)
+    }
 
     return false
   }
@@ -483,30 +498,22 @@ export class TrainingEnv {
     return true
   }
 
-  private sellPokemonAtBench(player: Player, benchIndex: number): boolean {
-    // Find pokemon at bench position benchIndex
-    let targetPokemon: Pokemon | null = null
+  private sellPokemonAtCell(player: Player, x: number, y: number): boolean {
+    const targetPokemon = this.findPokemonAt(player, x, y)
+    if (!targetPokemon) return false
+
     let targetId: string | null = null
-
     player.board.forEach((pokemon, key) => {
-      if (pokemon.positionY === 0 && pokemon.positionX === benchIndex) {
-        targetPokemon = pokemon
-        targetId = key
-      }
+      if (pokemon === targetPokemon) targetId = key
     })
-
-    if (!targetPokemon || !targetId) return false
+    if (!targetId) return false
 
     player.board.delete(targetId)
-    this.state.shop.releasePokemon(
-      (targetPokemon as Pokemon).name,
-      player,
-      this.state
-    )
+    this.state.shop.releasePokemon(targetPokemon.name, player, this.state)
 
     const sellPrice = getSellPrice(targetPokemon, this.state.specialGameRule)
     player.addMoney(sellPrice, false, null)
-    ;(targetPokemon as Pokemon).items.forEach((it: Item) => {
+    targetPokemon.items.forEach((it: Item) => {
       player.items.push(it)
     })
 
@@ -535,6 +542,93 @@ export class TrainingEnv {
 
     player.addExperience(4)
     player.money -= cost
+    return true
+  }
+
+  /**
+   * Find the "first available unit" by scanning bench left-to-right,
+   * then board rows top-to-bottom. Used by MOVE actions.
+   */
+  private findFirstAvailableUnit(player: Player): Pokemon | null {
+    // Scan bench left-to-right (y=0, x=0..7)
+    for (let x = 0; x < GRID_WIDTH; x++) {
+      const pokemon = this.findPokemonAt(player, x, 0)
+      if (pokemon) return pokemon
+    }
+    // Scan board row by row (y=1..3, x=0..7)
+    for (let y = 1; y < GRID_HEIGHT; y++) {
+      for (let x = 0; x < GRID_WIDTH; x++) {
+        const pokemon = this.findPokemonAt(player, x, y)
+        if (pokemon) return pokemon
+      }
+    }
+    return null
+  }
+
+  private moveUnitToCell(player: Player, targetX: number, targetY: number): boolean {
+    // Target must be empty
+    if (this.findPokemonAt(player, targetX, targetY)) return false
+
+    const pokemon = this.findFirstAvailableUnit(player)
+    if (!pokemon) return false
+
+    const sourceY = pokemon.positionY
+    const maxTeamSize = getMaxTeamSize(
+      player.experienceManager.level,
+      this.state.specialGameRule
+    )
+
+    // Moving bench → board: check board not full
+    if (targetY >= 1 && sourceY === 0) {
+      if (player.boardSize >= maxTeamSize) return false
+    }
+
+    pokemon.positionX = targetX
+    pokemon.positionY = targetY
+
+    // Update board size if crossing bench/board boundary
+    if (sourceY === 0 && targetY >= 1) {
+      player.boardSize++
+    } else if (sourceY >= 1 && targetY === 0) {
+      player.boardSize--
+    }
+
+    if (typeof pokemon.onChangePosition === "function") {
+      pokemon.onChangePosition(targetX, targetY, player, this.state)
+    }
+    player.updateSynergies()
+    return true
+  }
+
+  private removeFromShop(player: Player, shopIndex: number): boolean {
+    const name = player.shop[shopIndex]
+    if (!name || name === Pkm.DEFAULT) return false
+
+    const cost = getBuyPrice(name, this.state.specialGameRule)
+    if (player.money < cost) return false
+
+    // DO NOT deduct gold — gold is a gate check only (matches real game)
+    player.shop[shopIndex] = Pkm.DEFAULT
+    player.shopLocked = true
+    this.state.shop.releasePokemon(name, player, this.state)
+    return true
+  }
+
+  private combineItems(player: Player, pairIndex: number): boolean {
+    const items = Array.from(player.items.values()) as Item[]
+    const pairs = enumerateItemPairs(items)
+    if (pairIndex >= pairs.length) return false
+
+    const [i, j] = pairs[pairIndex]
+    const itemA = items[i]
+    const itemB = items[j]
+    const result = findRecipeResult(itemA, itemB)
+    if (!result) return false
+
+    // Remove higher index first to avoid shifting
+    player.items.splice(j, 1)
+    player.items.splice(i, 1)
+    player.items.push(result)
     return true
   }
 
@@ -1294,7 +1388,10 @@ export class TrainingEnv {
     // END_TURN is always valid
     mask[TrainingAction.END_TURN] = 1
 
-    // BUY actions (slots 0-4 only; BUY_5 stays masked until Phase 3.2)
+    // LOCK_SHOP — always valid during normal shop phase
+    mask[TrainingAction.LOCK_SHOP] = 1
+
+    // BUY actions (slots 0-4; BUY_5 mask gated until obs expansion in Phase 3.2)
     for (let i = 0; i < 5; i++) {
       const pkm = agent.shop[i]
       if (pkm && pkm !== Pkm.DEFAULT) {
@@ -1306,11 +1403,28 @@ export class TrainingEnv {
       }
     }
 
-    // SELL actions (bench positions 0-7, mapped to grid cells 0-7 where y=0)
-    for (let x = 0; x < 8; x++) {
-      const pokemon = this.findPokemonAt(agent, x, 0)
-      if (pokemon) {
-        mask[TrainingAction.SELL_0 + x] = 1
+    // SELL actions — all 32 grid cells
+    for (let cell = 0; cell < GRID_CELLS; cell++) {
+      const [x, y] = cellToXY(cell)
+      if (this.findPokemonAt(agent, x, y)) {
+        mask[TrainingAction.SELL_0 + cell] = 1
+      }
+    }
+
+    // MOVE actions — empty cells that a unit could move to
+    const firstUnit = this.findFirstAvailableUnit(agent)
+    if (firstUnit) {
+      const sourceY = firstUnit.positionY
+      const maxTeamSize = getMaxTeamSize(
+        agent.experienceManager.level,
+        this.state.specialGameRule
+      )
+      for (let cell = 0; cell < GRID_CELLS; cell++) {
+        const [x, y] = cellToXY(cell)
+        if (this.findPokemonAt(agent, x, y)) continue // occupied
+        // Bench → board: only valid if board not full
+        if (y >= 1 && sourceY === 0 && agent.boardSize >= maxTeamSize) continue
+        mask[TrainingAction.MOVE_0 + cell] = 1
       }
     }
 
@@ -1323,6 +1437,29 @@ export class TrainingEnv {
     // LEVEL_UP
     if (agent.money >= 4 && agent.experienceManager.canLevelUp()) {
       mask[TrainingAction.LEVEL_UP] = 1
+    }
+
+    // REMOVE_SHOP — valid if slot has a pokemon and player can afford it (gold is gate only)
+    for (let i = 0; i < 6; i++) {
+      const pkm = agent.shop[i]
+      if (pkm && pkm !== Pkm.DEFAULT) {
+        const cost = getBuyPrice(pkm, this.state.specialGameRule)
+        if (agent.money >= cost) {
+          mask[TrainingAction.REMOVE_SHOP_0 + i] = 1
+        }
+      }
+    }
+
+    // COMBINE — valid pairs of held items that form a recipe
+    if (agent.items.length >= 2) {
+      const items = Array.from(agent.items.values()) as Item[]
+      const pairs = enumerateItemPairs(items)
+      for (let p = 0; p < pairs.length; p++) {
+        const [i, j] = pairs[p]
+        if (findRecipeResult(items[i], items[j])) {
+          mask[TrainingAction.COMBINE_0 + p] = 1
+        }
+      }
     }
 
     return mask
@@ -1506,7 +1643,9 @@ export class TrainingEnv {
         }
 
         // Auto-place team on board
-        this.autoPlaceTeam(player)
+        if (TRAINING_AUTO_PLACE) {
+          this.autoPlaceTeam(player)
+        }
       }
     }
 

@@ -86,6 +86,10 @@ export const SELF_PLAY = process.env.SELF_PLAY === "true"
 // HTTP server port for training API
 export const TRAINING_API_PORT = parseInt(process.env.TRAINING_PORT ?? "9100")
 
+// Auto-place: when true, agent's bench pokemon are auto-placed on board at turn end.
+// Flip to false in Phase 7.1 when the agent controls placement via MOVE actions.
+export const TRAINING_AUTO_PLACE = true
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8
