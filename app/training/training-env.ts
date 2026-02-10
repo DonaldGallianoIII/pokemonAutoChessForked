@@ -15,7 +15,8 @@ import {
   FIGHTING_PHASE_DURATION,
   ItemCarouselStages,
   PortalCarouselStages,
-  StageDuration
+  StageDuration,
+  SynergyTriggers
 } from "../config"
 import { selectMatchups } from "../core/matchmaking"
 import Simulation from "../core/simulation"
@@ -72,12 +73,16 @@ import {
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
+  REWARD_HP_SCALE,
+  REWARD_INTEREST_BONUS,
   REWARD_PER_DRAW,
+  REWARD_PER_ENEMY_KILL,
   REWARD_PER_KILL,
   REWARD_PER_LOSS,
   REWARD_PER_WIN,
   REWARD_PLACEMENT_OFFSET,
   REWARD_PLACEMENT_SCALE,
+  REWARD_SYNERGY_THRESHOLD,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
@@ -120,6 +125,7 @@ export class TrainingEnv {
   actionsThisTurn = 0
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
+  prevActiveSynergyCount = 0
   cachedBots: IBot[] = []
   additionalUncommonPool: Pkm[] = []
   additionalRarePool: Pkm[] = []
@@ -247,6 +253,7 @@ export class TrainingEnv {
     this.actionsThisTurn = 0
     this.totalSteps = 0
     this.lastBattleResult = null
+    this.prevActiveSynergyCount = 0
     this.resetTurnState()
 
     return {
@@ -821,6 +828,16 @@ export class TrainingEnv {
       })
     }
 
+    // Capture initial enemy team sizes for kill counting (6.3)
+    const initialEnemySizes = new Map<string, number>()
+    this.state.players.forEach((player) => {
+      if (!player.alive) return
+      const sim = this.state.simulations.get(player.simulationId)
+      if (!sim) return
+      const enemyTeam = player.team === Team.BLUE_TEAM ? sim.redTeam : sim.blueTeam
+      initialEnemySizes.set(player.id, enemyTeam.size)
+    })
+
     // Run all simulations synchronously
     let steps = 0
     let allFinished = false
@@ -835,11 +852,27 @@ export class TrainingEnv {
       steps++
     }
 
-    // Force-finish any remaining simulations
+    // Force-finish any remaining simulations (split from stop for data extraction)
     this.state.simulations.forEach((simulation) => {
       if (!simulation.finished) {
         simulation.onFinish()
       }
+    })
+
+    // Extract enemy kill counts BEFORE stop() clears teams (6.3)
+    const enemyKills = new Map<string, number>()
+    this.state.players.forEach((player) => {
+      if (!player.alive) return
+      const sim = this.state.simulations.get(player.simulationId)
+      if (!sim) return
+      const enemyTeam = player.team === Team.BLUE_TEAM ? sim.redTeam : sim.blueTeam
+      const initial = initialEnemySizes.get(player.id) ?? 0
+      const surviving = enemyTeam.size
+      enemyKills.set(player.id, Math.max(0, initial - surviving))
+    })
+
+    // Now stop all simulations (clears teams)
+    this.state.simulations.forEach((simulation) => {
       simulation.stop()
     })
 
@@ -901,6 +934,38 @@ export class TrainingEnv {
       }
     })
 
+    // ── Shaped rewards (Phase 6) ──────────────────────────────────────
+
+    // 6.2: Synergy activation delta — reward positive synergy growth
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const currentThresholds = this.countActiveSynergyThresholds(player)
+      if (id === this.agentId) {
+        const delta = currentThresholds - this.prevActiveSynergyCount
+        if (delta > 0) {
+          rewards.set(id, (rewards.get(id) ?? 0) + delta * REWARD_SYNERGY_THRESHOLD)
+        }
+      }
+    })
+
+    // 6.3: Combat damage — reward enemy kills
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const kills = enemyKills.get(id) ?? 0
+      if (kills > 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + kills * REWARD_PER_ENEMY_KILL)
+      }
+    })
+
+    // 6.4: HP preservation — small bonus for winning with high HP
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const lastHistory = player.history.at(-1)
+      if (lastHistory?.result === BattleResult.WIN) {
+        rewards.set(id, (rewards.get(id) ?? 0) + (player.life / 100) * REWARD_HP_SCALE)
+      }
+    })
+
     // Track agent's last battle result for logging
     const agent = this.state.players.get(this.agentId)
     if (agent) {
@@ -950,6 +1015,20 @@ export class TrainingEnv {
         income += 5
         player.addMoney(income, true, null)
         player.addExperience(2)
+
+        // 6.1: Interest bonus with board guard — must field nearly full team
+        if (!player.isBot && player.interest > 0) {
+          const maxTeam = getMaxTeamSize(
+            player.experienceManager.level,
+            this.state.specialGameRule
+          )
+          if (player.boardSize >= maxTeam - 2) {
+            rewards.set(
+              player.id,
+              (rewards.get(player.id) ?? 0) + player.interest * REWARD_INTEREST_BONUS
+            )
+          }
+        }
       })
 
       // Update bot levels
@@ -1066,6 +1145,12 @@ export class TrainingEnv {
 
     // Auto-pick for bots only; agent propositions stay pending for PICK actions
     this.autoPickPropositionsForBots()
+
+    // Snapshot synergy count at start of pick phase for delta reward (6.2)
+    const agentForSynergy = this.state.players.get(this.agentId)
+    if (agentForSynergy) {
+      this.prevActiveSynergyCount = this.countActiveSynergyThresholds(agentForSynergy)
+    }
   }
 
   /**
@@ -1606,6 +1691,21 @@ export class TrainingEnv {
       }
     })
     return found
+  }
+
+  /**
+   * Count how many synergies have reached their first activation threshold.
+   * Used for delta-based synergy reward shaping.
+   */
+  private countActiveSynergyThresholds(player: Player): number {
+    let count = 0
+    player.synergies.forEach((value, synergy) => {
+      const triggers = SynergyTriggers[synergy as Synergy]
+      if (triggers && triggers.length > 0 && value >= triggers[0]) {
+        count++
+      }
+    })
+    return count
   }
 
   private computeFinalReward(agent: Player): number {
