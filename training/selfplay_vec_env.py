@@ -111,10 +111,11 @@ class SelfPlayVecEnv(VecEnv):
         dones = np.array(response["dones"], dtype=bool)
         infos = response["infos"]
 
-        # Inject action masks into infos for MaskablePPO
+        # Inject action masks into infos for MaskablePPO.
+        # sb3-contrib expects "action_masks" (plural 's') — NOT "actionMask" (TS camelCase).
         for i, info in enumerate(infos):
             mask = np.array(info.get("actionMask", np.ones(self._num_actions)), dtype=np.int8)
-            info["action_mask"] = mask
+            info["action_masks"] = mask
             self._action_masks[i] = mask
 
         # Issue #3: When ALL dones are True, the game has ended.
@@ -135,13 +136,21 @@ class SelfPlayVecEnv(VecEnv):
         return [False] * self.num_envs
 
     def env_method(self, method_name, *method_args, indices=None, **method_kwargs):
-        raise NotImplementedError
+        # sb3-contrib MaskablePPO calls env.env_method("action_masks") to get
+        # per-sub-env masks when using a VecEnv. Dispatch to our action_masks().
+        if method_name == "action_masks":
+            masks = self.action_masks()
+            target = indices if indices is not None else range(self.num_envs)
+            return [masks[i] for i in target]
+        raise NotImplementedError(f"env_method('{method_name}') not supported")
 
     def get_attr(self, attr_name, indices=None):
-        raise NotImplementedError
+        if attr_name == "action_masks":
+            return [self.action_masks]
+        raise NotImplementedError(f"get_attr('{attr_name}') not supported")
 
     def set_attr(self, attr_name, value, indices=None):
-        raise NotImplementedError
+        raise NotImplementedError(f"set_attr('{attr_name}') not supported")
 
     def seed(self, seed=None):
         pass

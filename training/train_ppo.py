@@ -52,7 +52,14 @@ class ActionMaskCallback(BaseCallback):
 
 
 class TrainingMetricsCallback(BaseCallback):
-    """Logs custom training metrics to TensorBoard."""
+    """
+    Logs custom training metrics to TensorBoard.
+
+    Tracks per-episode: reward, step count (game length), final rank, final stage.
+    Game length is critical for detecting degenerate self-play equilibria:
+    - Sudden drop → agents learned to suicide early
+    - Sudden spike → agents are stalling / all-padding
+    """
 
     def __init__(self, verbose=0):
         super().__init__(verbose)
@@ -60,6 +67,7 @@ class TrainingMetricsCallback(BaseCallback):
         self.episode_lengths = []
         self.episode_ranks = []
         self.episode_stages = []
+        self._total_episodes = 0
 
     def _on_step(self) -> bool:
         # Check for episode end
@@ -68,6 +76,7 @@ class TrainingMetricsCallback(BaseCallback):
             if "episode" in info:
                 self.episode_rewards.append(info["episode"]["r"])
                 self.episode_lengths.append(info["episode"]["l"])
+                self._total_episodes += 1
             if "rank" in info:
                 self.episode_ranks.append(info["rank"])
             if "stage" in info:
@@ -79,8 +88,12 @@ class TrainingMetricsCallback(BaseCallback):
                 "training/mean_reward",
                 np.mean(self.episode_rewards[-10:]),
             )
+            # Game length — watch for degenerate equilibria:
+            #   Healthy range: ~100-300 steps per game
+            #   <50  → agents dying too fast / suiciding
+            #   >500 → agents stalling / all-padding END_TURN
             self.logger.record(
-                "training/mean_episode_length",
+                "training/mean_game_length",
                 np.mean(self.episode_lengths[-10:]),
             )
             if self.episode_ranks:
@@ -93,6 +106,7 @@ class TrainingMetricsCallback(BaseCallback):
                     "training/mean_final_stage",
                     np.mean(self.episode_stages[-10:]),
                 )
+            self.logger.record("training/total_episodes", self._total_episodes)
 
         return True
 
@@ -150,6 +164,7 @@ def train(
     save_dir: str = "training/checkpoints",
     log_dir: str = "training/logs",
     resume_from: Optional[str] = None,
+    phase: str = "A",
 ):
     """
     Train a PPO agent on Pokemon Auto Chess.
@@ -168,9 +183,16 @@ def train(
         save_dir: Directory for model checkpoints
         log_dir: Directory for TensorBoard logs
         resume_from: Path to checkpoint to resume from
+        phase: Training phase label for checkpoint naming.
+               "A" = dummy bots (curriculum), "B" = self-play.
+               When transitioning A→B, pass --resume with Phase A checkpoint.
     """
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
+
+    # Checkpoint prefix encodes phase + action space for rollback clarity.
+    # e.g. "phaseA_22act", "phaseB_22act", "phaseB_92act"
+    checkpoint_prefix = f"phase{phase}_22act"
 
     # Wait for server
     wait_for_server(server_url)
@@ -206,19 +228,23 @@ def train(
         )
 
     # Callbacks
+    # Save every 50k steps with a descriptive prefix for staged training.
+    # When transitioning Phase A → B, you can roll back to a Phase A checkpoint
+    # if self-play destabilizes.
     checkpoint_cb = CheckpointCallback(
-        save_freq=10_000,
+        save_freq=50_000,
         save_path=save_dir,
-        name_prefix="ppo_pac",
+        name_prefix=checkpoint_prefix,
     )
     metrics_cb = TrainingMetricsCallback()
 
     print(f"\nStarting training for {total_timesteps} timesteps...")
+    print(f"  Phase:          {phase} ({checkpoint_prefix})")
     print(f"  Learning rate:  {learning_rate}")
     print(f"  Batch size:     {batch_size}")
     print(f"  N steps:        {n_steps}")
     print(f"  Entropy coef:   {ent_coef}")
-    print(f"  Checkpoints:    {save_dir}")
+    print(f"  Checkpoints:    {save_dir}/{checkpoint_prefix}_*")
     print(f"  TensorBoard:    {log_dir}")
     print(f"\nMonitor training with: tensorboard --logdir {log_dir}")
     print()
@@ -229,8 +255,8 @@ def train(
         progress_bar=True,
     )
 
-    # Save final model
-    final_path = os.path.join(save_dir, "ppo_pac_final")
+    # Save final model with phase prefix
+    final_path = os.path.join(save_dir, f"{checkpoint_prefix}_final")
     model.save(final_path)
     print(f"\nTraining complete! Model saved to {final_path}")
 
@@ -284,6 +310,11 @@ if __name__ == "__main__":
     parser.add_argument("--save-dir", default="training/checkpoints", help="Checkpoint directory")
     parser.add_argument("--log-dir", default="training/logs", help="TensorBoard log directory")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint path")
+    parser.add_argument(
+        "--phase", default="A", choices=["A", "B"],
+        help="Training phase: A=dummy bots (curriculum), B=self-play. "
+             "Affects checkpoint naming. When going A→B, use --resume with Phase A checkpoint."
+    )
     parser.add_argument("--evaluate", default=None, help="Evaluate model at path instead of training")
     parser.add_argument("--eval-games", type=int, default=20, help="Number of evaluation games")
     parser.add_argument("--benchmark", action="store_true", help="Just run benchmark")
@@ -307,4 +338,5 @@ if __name__ == "__main__":
             save_dir=args.save_dir,
             log_dir=args.log_dir,
             resume_from=args.resume,
+            phase=args.phase,
         )

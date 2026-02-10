@@ -38,7 +38,18 @@ export const TOTAL_OBS_SIZE =
   OBS_OPPONENT_STATS +
   OBS_PROPOSITION_SLOTS * OBS_PROPOSITION_FEATURES
 
-// Action space
+// Action space (22-action v1)
+//
+// ACTION INDEX MAPPING — training env vs future agent-io extension:
+//
+// These indices are internal to the training env. They do NOT match the
+// planned 92-action agent-io extension layout (OPTION_B_MASTER_PLAN.md),
+// which uses: BUY 0-5, REFRESH 6, LEVEL 7, LOCK 8, END_TURN 9, MOVE 10-41,
+// SELL 42-73, REMOVE_SHOP 74-79, PICK 80-85, COMBINE_ITEMS 86-91.
+//
+// When bridging a trained model to the extension, you MUST translate indices.
+// After Phase 1 expansion to 92 actions, the training env should switch to
+// match the extension layout 1:1 to eliminate translation overhead.
 export enum TrainingAction {
   END_TURN = 0, // End pick phase, advance to fight
   BUY_0 = 1,

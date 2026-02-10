@@ -1497,9 +1497,12 @@ export class TrainingEnv {
             player,
             action - TrainingAction.PICK_PROPOSITION_0
           )
+          // Don't count proposition picks toward turn end — player continues shopping
+          continue
         }
-        // Don't count proposition picks toward turn end — player continues shopping
-        continue
+        // Non-proposition action during propositions (END_TURN fallback when
+        // bench is full and no proposition can be picked). Fall through to
+        // normal action processing so the turn-end logic can handle it.
       }
 
       // Execute normal PICK phase action
