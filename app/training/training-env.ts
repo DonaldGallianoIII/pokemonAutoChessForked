@@ -1367,10 +1367,8 @@ export class TrainingEnv {
     const stage = this.state.stageLevel
     const R = PRECOMPUTED_POKEMONS_PER_RARITY
 
-    // Each slot defines a rarity and a target star level.
-    // Star density increases by stage to simulate real player evolution.
-    //   stars=1: base form, stars=2: first evolution, stars=3: fully evolved
-    type Slot = { rarity: keyof typeof R; stars: number }
+    // Each slot defines a rarity, target star level, and whether it gets a guaranteed item.
+    type Slot = { rarity: keyof typeof R; stars: number; item?: boolean }
 
     // Helper: pick a random pokemon from a rarity pool at the target star level.
     // Falls back to <= stars, then unfiltered pool (safety net for pools
@@ -1383,44 +1381,73 @@ export class TrainingEnv {
       return pickRandomIn(fallback.length > 0 ? fallback : pool)
     }
 
-    // s(rarity, stars) shorthand for slot definitions
-    const s = (rarity: keyof typeof R, stars = 1): Slot => ({ rarity, stars })
+    // s(rarity, stars, item?) shorthand for slot definitions
+    const s = (rarity: keyof typeof R, stars = 1, item = false): Slot => ({ rarity, stars, item })
 
-    // Per-slot rarity + star composition by stage bracket.
-    // Star density gradually increases to simulate real player evolution curves.
+    // Per-slot composition by stage bracket.
+    // UNIQUE persists from stage 11+, LEGENDARY from stage 21+.
+    // Items marked with `true` are guaranteed on that slot.
+    // Additional random items go on non-guaranteed slots.
     let slots: Slot[]
-    if (stage >= 28) {
-      // 9 units: 5 EPIC(2☆), 2 ULTRA(2☆), 1 UNIQUE(3☆), 1 LEGENDARY(3☆)
-      slots = [s("EPIC",2),s("EPIC",2),s("EPIC",2),s("EPIC",2),s("EPIC",2),s("ULTRA",2),s("ULTRA",2),s("UNIQUE",3),s("LEGENDARY",3)]
-    } else if (stage >= 25) {
-      // 8 units: 1 UNIQUE(3☆), 1 LEGENDARY(3☆), 2 RARE(2☆), 2 EPIC(2☆), 2 ULTRA
-      slots = [s("UNIQUE",3),s("LEGENDARY",3),s("RARE",2),s("RARE",2),s("EPIC",2),s("EPIC",2),s("ULTRA"),s("ULTRA")]
-    } else if (stage >= 18) {
-      // 7 units: 2 UNCOMMON(2☆), 2 UNCOMMON(1☆), 2 RARE(2☆), 1 EPIC
-      slots = [s("UNCOMMON",2),s("UNCOMMON",2),s("UNCOMMON"),s("UNCOMMON"),s("RARE",2),s("RARE",2),s("EPIC")]
-    } else if (stage >= 14) {
-      // 6 units: 1 UNCOMMON(2☆), 2 UNCOMMON(1☆), 1 RARE(2☆), 2 RARE(1☆)
-      slots = [s("UNCOMMON",2),s("UNCOMMON"),s("UNCOMMON"),s("RARE",2),s("RARE"),s("RARE")]
-    } else if (stage >= 10) {
-      // 5 units: 1 COMMON(2☆), 2 COMMON(1☆), 1 UNCOMMON, 1 RARE
-      slots = [s("COMMON",2),s("COMMON"),s("COMMON"),s("UNCOMMON"),s("RARE")]
-    } else if (stage >= 8) {
-      // 4 units: 1 COMMON(2☆), 1 COMMON(1☆), 1 UNCOMMON, 1 RARE
-      slots = [s("COMMON",2),s("COMMON"),s("UNCOMMON"),s("RARE")]
-    } else if (stage >= 5) {
-      // 3 units: all base forms
-      slots = [s("COMMON"),s("COMMON"),s("UNCOMMON")]
-    } else {
-      // 2 units: all base forms
-      slots = [s("COMMON"),s("COMMON")]
-    }
+    let extraItems = 0 // additional items on random non-guaranteed slots
 
-    // Item ramp — number of bot pokemon that each get 1 random crafted item.
-    // Gradually introduces items so the agent learns to deal with equipped enemies.
-    //   Stage 8+:  1 unit gets an item
-    //   Stage 14+: 2 units get items
-    //   Stage 28+: all units get items
-    const itemSlots = stage >= 28 ? slots.length : stage >= 14 ? 2 : stage >= 8 ? 1 : 0
+    if (stage >= 28) {
+      // 9 units: ALL get 1 item
+      slots = [
+        s("UNIQUE",3,true), s("LEGENDARY",3,true),
+        s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true), s("EPIC",2,true),
+        s("ULTRA",2,true), s("ULTRA",2,true)
+      ]
+    } else if (stage >= 25) {
+      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 random items on others
+      slots = [
+        s("UNIQUE",3,true), s("LEGENDARY",3,true),
+        s("RARE",3), s("RARE",3), s("EPIC",2), s("EPIC",2), s("ULTRA",2), s("ULTRA",1)
+      ]
+      extraItems = 2
+    } else if (stage >= 21) {
+      // 8 units: UNIQUE(item) + LEGENDARY(item) + 2 random items on others
+      slots = [
+        s("UNIQUE",3,true), s("LEGENDARY",3,true),
+        s("RARE",2), s("RARE",2), s("EPIC",2), s("EPIC",1), s("EPIC",1), s("ULTRA",1)
+      ]
+      extraItems = 2
+    } else if (stage >= 18) {
+      // 7 units: UNIQUE(item) + 2 random items on others
+      slots = [
+        s("UNIQUE",3,true),
+        s("RARE",2), s("RARE",2), s("RARE",2), s("RARE",2), s("EPIC",1), s("EPIC",1)
+      ]
+      extraItems = 2
+    } else if (stage >= 14) {
+      // 7 units: UNIQUE(item) + 2 random items on others
+      slots = [
+        s("UNIQUE",3,true),
+        s("UNCOMMON",2), s("UNCOMMON",1), s("RARE",2), s("RARE",1), s("RARE",1), s("EPIC",1)
+      ]
+      extraItems = 2
+    } else if (stage >= 11) {
+      // 6 units: UNIQUE(item) + 1 random item on other
+      slots = [
+        s("UNIQUE",3,true),
+        s("COMMON",2), s("COMMON",2), s("UNCOMMON",1), s("RARE",1), s("RARE",1)
+      ]
+      extraItems = 1
+    } else if (stage >= 10) {
+      // 5 units: 1 item on random unit
+      slots = [s("COMMON",2), s("COMMON",2), s("COMMON",1), s("UNCOMMON",1), s("RARE",1)]
+      extraItems = 1
+    } else if (stage >= 8) {
+      // 4 units: 1 item on random unit
+      slots = [s("COMMON",2), s("COMMON",1), s("UNCOMMON",1), s("RARE",1)]
+      extraItems = 1
+    } else if (stage >= 5) {
+      // 3 units: no items
+      slots = [s("COMMON",1), s("COMMON",1), s("UNCOMMON",1)]
+    } else {
+      // 2 units: no items
+      slots = [s("COMMON",1), s("COMMON",1)]
+    }
 
     this.state.players.forEach((player) => {
       if (!player.isBot || !player.alive) return
@@ -1431,10 +1458,15 @@ export class TrainingEnv {
         player.board.delete(key)
       })
 
-      // Pick which slots get items (random distinct indices)
-      const itemIndices = new Set<number>()
-      while (itemIndices.size < Math.min(itemSlots, slots.length)) {
-        itemIndices.add(Math.floor(Math.random() * slots.length))
+      // Determine which non-guaranteed slots get extra random items
+      const extraItemIndices = new Set<number>()
+      if (extraItems > 0) {
+        const eligible = slots
+          .map((slot, i) => (!slot.item ? i : -1))
+          .filter((i) => i >= 0)
+        while (extraItemIndices.size < Math.min(extraItems, eligible.length)) {
+          extraItemIndices.add(eligible[Math.floor(Math.random() * eligible.length)])
+        }
       }
 
       for (let t = 0; t < slots.length; t++) {
@@ -1442,7 +1474,7 @@ export class TrainingEnv {
         const pokemon = PokemonFactory.createPokemonFromName(pkm, player)
         pokemon.positionX = t % 8
         pokemon.positionY = 1 + Math.floor(t / 8)
-        if (itemIndices.has(t)) {
+        if (slots[t].item || extraItemIndices.has(t)) {
           pokemon.items.add(pickRandomIn(CraftableItemsNoScarves))
         }
         player.board.set(pokemon.id, pokemon)
