@@ -311,7 +311,7 @@ export class TrainingEnv {
 
       if (shouldEndTurn) {
         // Safety: if propositions are still pending at turn end, auto-pick randomly
-        if (agent.pokemonsProposition.length > 0) {
+        if (agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0) {
           this.autoPickForAgent(agent)
         }
 
@@ -352,12 +352,20 @@ export class TrainingEnv {
   }
 
   private executeAction(action: number, agent: Player): boolean {
-    // If agent has propositions pending, only allow PICK actions
+    // If agent has pokemon propositions pending, only allow PICK actions
     if (agent.pokemonsProposition.length > 0) {
       if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
         return this.pickProposition(agent, action - TrainingAction.PICK_0)
       }
       return false // no other actions allowed during proposition phase
+    }
+
+    // Item-only propositions (item carousel, PVE rewards)
+    if (agent.itemsProposition.length > 0) {
+      if (action >= TrainingAction.PICK_0 && action <= TrainingAction.PICK_0 + 5) {
+        return this.pickItemProposition(agent, action - TrainingAction.PICK_0)
+      }
+      return false // no other actions allowed during item proposition phase
     }
 
     // BUY_0..BUY_5 (0-5)
@@ -474,6 +482,22 @@ export class TrainingEnv {
       }
     })
 
+    return true
+  }
+
+  /**
+   * Pick an item from item-only propositions (item carousel, PVE rewards).
+   * When pokemonsProposition is empty but itemsProposition has items.
+   */
+  private pickItemProposition(player: Player, propositionIndex: number): boolean {
+    if (player.itemsProposition.length === 0) return false
+    if (propositionIndex >= player.itemsProposition.length) return false
+
+    const item = player.itemsProposition[propositionIndex]
+    if (item == null) return false
+
+    player.items.push(item)
+    player.itemsProposition.clear()
     return true
   }
 
@@ -882,6 +906,31 @@ export class TrainingEnv {
       }
     }
 
+    // PVE reward handling: auto-give direct rewards, set propositions for picks
+    if (isPVE) {
+      const pveStage = PVEStages[this.state.stageLevel]
+      if (pveStage) {
+        this.state.players.forEach((player) => {
+          if (!player.alive) return
+          const lastHist = player.history.at(-1)
+          if (lastHist?.result !== BattleResult.WIN) return
+
+          // Auto-give direct rewards (getRewards)
+          const directRewards = pveStage.getRewards?.(player) ?? []
+          directRewards.forEach((item) => player.items.push(item))
+
+          // Set reward propositions for agent to pick (getRewardsPropositions)
+          const rewardPropositions = pveStage.getRewardsPropositions?.(player) ?? []
+          if (rewardPropositions.length > 0 && !player.isBot) {
+            rewardPropositions.forEach((item) => player.itemsProposition.push(item))
+          } else if (rewardPropositions.length > 0 && player.isBot) {
+            // Bots auto-pick a random reward proposition
+            player.items.push(pickRandomIn(rewardPropositions))
+          }
+        })
+      }
+    }
+
     if (!this.state.gameFinished) {
       this.state.stageLevel += 1
 
@@ -942,7 +991,7 @@ export class TrainingEnv {
       this.autoPickPropositionsForBots()
     }
 
-    // Handle item carousel stages — give each alive player a random item
+    // Handle item carousel stages — present 3 random items as propositions
     if (ItemCarouselStages.includes(this.state.stageLevel)) {
       this.state.players.forEach((player) => {
         if (!player.isBot && player.alive) {
@@ -950,7 +999,8 @@ export class TrainingEnv {
             this.state.stageLevel >= 20
               ? CraftableItemsNoScarves
               : ItemComponentsNoFossilOrScarf
-          player.items.push(pickRandomIn(itemPool))
+          const choices = pickNRandomIn(itemPool, 3)
+          choices.forEach((item) => player.itemsProposition.push(item))
         }
       })
     }
@@ -1078,6 +1128,13 @@ export class TrainingEnv {
     // If propositions still there (pickProposition failed due to no space), force clear
     if (agent.pokemonsProposition.length > 0) {
       agent.pokemonsProposition.clear()
+      agent.itemsProposition.clear()
+    }
+    // Item-only propositions (item carousel, PVE rewards)
+    if (agent.itemsProposition.length > 0) {
+      const items = values(agent.itemsProposition)
+      const pick = pickRandomIn(items)
+      agent.items.push(pick)
       agent.itemsProposition.clear()
     }
   }
@@ -1304,7 +1361,11 @@ export class TrainingEnv {
       (p) => p.alive
     ).length
     obs.push(playersAlive / 8)
-    obs.push(agent.pokemonsProposition.length > 0 ? 1 : 0) // hasPropositions
+    obs.push(
+      agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0
+        ? 1
+        : 0
+    ) // hasPropositions
     obs.push(
       this.state.weather
         ? getWeatherIndex(this.state.weather as Weather)
@@ -1358,8 +1419,19 @@ export class TrainingEnv {
 
     // ── Propositions (6 × 7 features = 42) ─────────────────────────────
     const propositions = values(agent.pokemonsProposition) as Pkm[]
+    const itemOnlyPropositions = propositions.length === 0 && agent.itemsProposition.length > 0
     for (let i = 0; i < OBS_PROPOSITION_SLOTS; i++) {
-      if (i < propositions.length && propositions[i]) {
+      if (itemOnlyPropositions && i < agent.itemsProposition.length) {
+        // Item-only propositions (item carousel, PVE rewards):
+        // speciesIndex=0, rarity=0, types=0, last feature = item index
+        obs.push(0) // speciesIndex (no pokemon)
+        obs.push(0) // rarity
+        obs.push(0) // type1
+        obs.push(0) // type2
+        obs.push(0) // type3
+        obs.push(0) // type4
+        obs.push(getItemIndex(agent.itemsProposition[i])) // itemIndex
+      } else if (i < propositions.length && propositions[i]) {
         const data = getPokemonData(propositions[i])
         const types = data.types ?? []
         obs.push(getPkmSpeciesIndex(propositions[i])) // speciesIndex
@@ -1367,13 +1439,13 @@ export class TrainingEnv {
         obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
         obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
         obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
-        obs.push(0) // type4 (always 0, propositions have no items)
+        obs.push(0) // type4
         obs.push(
           agent.itemsProposition.length > i &&
             agent.itemsProposition[i] != null
-            ? 1
+            ? getItemIndex(agent.itemsProposition[i])
             : 0
-        ) // hasItem
+        ) // itemIndex (0 if no paired item)
       } else {
         obs.push(0, 0, 0, 0, 0, 0, 0) // 7 zeros
       }
@@ -1399,7 +1471,7 @@ export class TrainingEnv {
       return mask
     }
 
-    // If agent has propositions pending, only PICK actions are valid
+    // If agent has pokemon propositions pending, only PICK actions are valid
     if (agent.pokemonsProposition.length > 0) {
       const freeSpace = getFreeSpaceOnBench(agent.board)
       for (let i = 0; i < agent.pokemonsProposition.length; i++) {
@@ -1423,6 +1495,16 @@ export class TrainingEnv {
       // If no proposition is valid (bench full, no evolution), allow END_TURN as fallback
       if (mask.every((m) => m === 0)) {
         mask[TrainingAction.END_TURN] = 1
+      }
+      return mask
+    }
+
+    // Item-only propositions (item carousel, PVE rewards)
+    if (agent.itemsProposition.length > 0) {
+      for (let i = 0; i < agent.itemsProposition.length; i++) {
+        if (agent.itemsProposition[i] != null) {
+          mask[TrainingAction.PICK_0 + i] = 1
+        }
       }
       return mask
     }
@@ -1668,6 +1750,23 @@ export class TrainingEnv {
         // normal action processing so the turn-end logic can handle it.
       }
 
+      // Item-only propositions (item carousel, PVE rewards)
+      if (player.pokemonsProposition.length === 0 && player.itemsProposition.length > 0) {
+        if (
+          action >= TrainingAction.PICK_0 &&
+          action <= TrainingAction.PICK_0 + 5
+        ) {
+          this.pickItemProposition(
+            player,
+            action - TrainingAction.PICK_0
+          )
+          // Don't count item picks toward turn end — player continues shopping
+          continue
+        }
+        // Shouldn't happen (mask only allows PICK during item propositions),
+        // but fall through to normal processing as safety
+      }
+
       // Execute normal PICK phase action
       this.executeAction(action, player)
       const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
@@ -1681,7 +1780,7 @@ export class TrainingEnv {
         this.turnEnded.set(playerId, true)
 
         // Safety: auto-resolve any pending propositions
-        if (player.pokemonsProposition.length > 0) {
+        if (player.pokemonsProposition.length > 0 || player.itemsProposition.length > 0) {
           this.autoPickForAgent(player)
         }
 

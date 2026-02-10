@@ -36,7 +36,7 @@ export const OBS_OPPONENT_COUNT = 7
 export const OBS_OPPONENT_FEATURES = 10 // life, rank, level, gold, streak, boardSize, topSyn1Idx, topSyn1Count, topSyn2Idx, topSyn2Count
 export const OBS_OPPONENT_STATS = OBS_OPPONENT_COUNT * OBS_OPPONENT_FEATURES // 70
 export const OBS_PROPOSITION_SLOTS = 6
-export const OBS_PROPOSITION_FEATURES = 7 // species, rarity, type1-4, hasItem
+export const OBS_PROPOSITION_FEATURES = 7 // species, rarity, type1-4, itemIndex
 
 export const TOTAL_OBS_SIZE =
   OBS_PLAYER_STATS +                                  // 14
