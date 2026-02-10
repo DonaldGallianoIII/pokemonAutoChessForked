@@ -23,10 +23,12 @@ export const TRAINING_MAX_FIGHT_STEPS = 2000
 export const MAX_PROPOSITIONS = 6
 
 // Observation space dimensions
-export const OBS_PLAYER_STATS = 8 // life, money, level, streak, interest, alive, rank, boardSize
-export const OBS_SHOP_SLOTS = 5 // 5 shop slots, each encoded as pokemon rarity
-export const OBS_BOARD_SLOTS = 40 // 8 bench + 32 board cells (4x8)
-export const OBS_BOARD_FEATURES_PER_SLOT = 3 // hasUnit, stars, rarity
+export const OBS_PLAYER_STATS = 14 // life, money, level, streak, interest, alive, rank, boardSize, expNeeded, shopFreeRolls, rerollCount, shopLocked, totalMoneyEarned, totalPlayerDamageDealt
+export const OBS_SHOP_SLOTS = 6 // 6 shop slots
+export const OBS_SHOP_FEATURES = 9 // per slot: hasUnit, species, rarity, cost, type1-4, isEvoPossible
+export const OBS_BOARD_SLOTS = 32 // 8x4 grid (y=0 bench, y=1-3 board)
+export const OBS_BOARD_FEATURES_PER_SLOT = 12 // hasUnit, species, stars, rarity, type1-4, atk, hp, range, numItems
+export const OBS_HELD_ITEMS = 10 // up to 10 held items (normalized item indices)
 export const OBS_SYNERGIES = 32 // 32 synergy types (padded, actual is 31)
 export const OBS_GAME_INFO = 4 // stageLevel, phase, playersAlive, hasPropositions
 export const OBS_OPPONENT_STATS = 16 // 2 features per opponent (life, rank) * 8 max opponents
@@ -152,4 +154,15 @@ SynergyArray.forEach((syn, i) => SynergyToIndex.set(syn, i))
 
 export function getSynergyIndex(synergy: Synergy): number {
   return ((SynergyToIndex.get(synergy) ?? 0) + 1) / NUM_SYNERGIES
+}
+
+// ─── Item-index lookup ───────────────────────────────────────────────
+
+const AllItems = Object.values(Item)
+const ItemToIndex = new Map<string, number>()
+AllItems.forEach((item, i) => ItemToIndex.set(item, i))
+const NUM_ITEMS = AllItems.length
+
+export function getItemIndex(item: Item): number {
+  return ((ItemToIndex.get(item) ?? 0) + 1) / NUM_ITEMS
 }

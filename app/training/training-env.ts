@@ -59,10 +59,14 @@ import {
   cellToXY,
   enumerateItemPairs,
   findRecipeResult,
+  getItemIndex,
+  getPkmSpeciesIndex,
+  getSynergyIndex,
   GRID_CELLS,
   GRID_HEIGHT,
   GRID_WIDTH,
   MAX_PROPOSITIONS,
+  OBS_HELD_ITEMS,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
   REWARD_PER_DRAW,
@@ -1195,8 +1199,20 @@ export class TrainingEnv {
       return new Array(TOTAL_OBS_SIZE).fill(0)
     }
 
-    // Player stats (8)
-    obs.push(agent.life / 100) // normalized
+    const rarityMap: Record<string, number> = {
+      [Rarity.COMMON]: 0.1,
+      [Rarity.UNCOMMON]: 0.2,
+      [Rarity.RARE]: 0.4,
+      [Rarity.EPIC]: 0.6,
+      [Rarity.ULTRA]: 0.8,
+      [Rarity.UNIQUE]: 0.9,
+      [Rarity.LEGENDARY]: 1.0,
+      [Rarity.HATCH]: 0.3,
+      [Rarity.SPECIAL]: 0.5
+    }
+
+    // ── Player stats (14) ──────────────────────────────────────────────
+    obs.push(agent.life / 100)
     obs.push(agent.money / 100)
     obs.push(agent.experienceManager.level / 9)
     obs.push(agent.streak / 10)
@@ -1204,77 +1220,71 @@ export class TrainingEnv {
     obs.push(agent.alive ? 1 : 0)
     obs.push(agent.rank / 8)
     obs.push(agent.boardSize / 9)
+    obs.push((agent.experienceManager.expNeeded ?? 0) / 32)
+    obs.push((agent.shopFreeRolls ?? 0) / 3)
+    obs.push((agent.rerollCount ?? 0) / 20)
+    obs.push(agent.shopLocked ? 1 : 0)
+    obs.push((agent.totalMoneyEarned ?? 0) / 200)
+    obs.push((agent.totalPlayerDamageDealt ?? 0) / 100)
 
-    // Shop (5 slots, encoded as pokemon rarity 0-1)
-    for (let i = 0; i < 5; i++) {
+    // ── Shop (6 slots × 9 features = 54) ───────────────────────────────
+    for (let i = 0; i < 6; i++) {
       const pkm = agent.shop[i]
       if (pkm && pkm !== Pkm.DEFAULT) {
         const data = getPokemonData(pkm)
-        const rarityMap: Record<string, number> = {
-          [Rarity.COMMON]: 0.1,
-          [Rarity.UNCOMMON]: 0.2,
-          [Rarity.RARE]: 0.4,
-          [Rarity.EPIC]: 0.6,
-          [Rarity.ULTRA]: 0.8,
-          [Rarity.UNIQUE]: 0.9,
-          [Rarity.LEGENDARY]: 1.0,
-          [Rarity.HATCH]: 0.3,
-          [Rarity.SPECIAL]: 0.5
-        }
-        obs.push(rarityMap[data.rarity] ?? 0)
+        const types = data.types ?? []
+        // Count copies on bench/board for evolution check
+        let copyCount = 0
+        agent.board.forEach((p) => {
+          if (p.name === pkm) copyCount++
+        })
+        obs.push(1) // hasUnit
+        obs.push(getPkmSpeciesIndex(pkm)) // speciesIndex
+        obs.push(rarityMap[data.rarity] ?? 0) // rarity
+        obs.push(getBuyPrice(pkm, this.state.specialGameRule) / 10) // cost
+        obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
+        obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
+        obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+        obs.push(0) // type4 (always 0, no items on shop pokemon)
+        obs.push(copyCount >= 2 ? 1 : 0) // isEvoPossible
       } else {
-        obs.push(0)
+        obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0) // 9 zeros
       }
     }
 
-    // Board/bench (40 slots * 3 features = 120)
-    // Bench: 8 positions (y=0, x=0..7)
-    for (let x = 0; x < 8; x++) {
-      const pokemon = this.findPokemonAt(agent, x, 0)
-      if (pokemon) {
-        const data = getPokemonData(pokemon.name)
-        const rarityMap: Record<string, number> = {
-          [Rarity.COMMON]: 0.1,
-          [Rarity.UNCOMMON]: 0.2,
-          [Rarity.RARE]: 0.4,
-          [Rarity.EPIC]: 0.6,
-          [Rarity.ULTRA]: 0.8,
-          [Rarity.UNIQUE]: 0.9,
-          [Rarity.LEGENDARY]: 1.0,
-          [Rarity.HATCH]: 0.3,
-          [Rarity.SPECIAL]: 0.5
-        }
-        obs.push(1) // has pokemon
-        obs.push(pokemon.stars / 3)
-        obs.push(rarityMap[data.rarity] ?? 0)
-      } else {
-        obs.push(0, 0, 0)
-      }
-    }
-
-    // Board: 4x8 = 32 positions (y=1..4, x=0..7)
-    for (let y = 1; y <= 4; y++) {
-      for (let x = 0; x < 8; x++) {
+    // ── Board (32 cells × 12 features = 384) ──────────────────────────
+    // Grid: y=0 bench, y=1-3 board. Cell = y*8+x.
+    for (let y = 0; y < GRID_HEIGHT; y++) {
+      for (let x = 0; x < GRID_WIDTH; x++) {
         const pokemon = this.findPokemonAt(agent, x, y)
         if (pokemon) {
           const data = getPokemonData(pokemon.name)
-          const rarityMap: Record<string, number> = {
-            [Rarity.COMMON]: 0.1,
-            [Rarity.UNCOMMON]: 0.2,
-            [Rarity.RARE]: 0.4,
-            [Rarity.EPIC]: 0.6,
-            [Rarity.ULTRA]: 0.8,
-            [Rarity.UNIQUE]: 0.9,
-            [Rarity.LEGENDARY]: 1.0,
-            [Rarity.HATCH]: 0.3,
-            [Rarity.SPECIAL]: 0.5
-          }
-          obs.push(1)
-          obs.push(pokemon.stars / 3)
-          obs.push(rarityMap[data.rarity] ?? 0)
+          const types = Array.from(pokemon.types.values()) as Synergy[]
+          obs.push(1) // hasUnit
+          obs.push(getPkmSpeciesIndex(pokemon.name)) // speciesIndex
+          obs.push(pokemon.stars / 3) // stars
+          obs.push(rarityMap[data.rarity] ?? 0) // rarity
+          obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
+          obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
+          obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+          obs.push(0) // type4 (stone types only during simulation)
+          obs.push(pokemon.atk / 50) // atk
+          obs.push(pokemon.hp / 500) // hp
+          obs.push(pokemon.range / 4) // range
+          obs.push(pokemon.items.size / 3) // numItems
         } else {
-          obs.push(0, 0, 0)
+          obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 12 zeros
         }
+      }
+    }
+
+    // ── Held items (10) ────────────────────────────────────────────────
+    const heldItems = Array.from(agent.items.values()) as Item[]
+    for (let i = 0; i < OBS_HELD_ITEMS; i++) {
+      if (i < heldItems.length) {
+        obs.push(getItemIndex(heldItems[i]))
+      } else {
+        obs.push(0)
       }
     }
 
@@ -1309,17 +1319,6 @@ export class TrainingEnv {
     // Proposition slots (6 slots × 3 features = 18)
     // Each slot: rarity, numTypes, hasItem
     const propositions = values(agent.pokemonsProposition) as Pkm[]
-    const rarityMap: Record<string, number> = {
-      [Rarity.COMMON]: 0.1,
-      [Rarity.UNCOMMON]: 0.2,
-      [Rarity.RARE]: 0.4,
-      [Rarity.EPIC]: 0.6,
-      [Rarity.ULTRA]: 0.8,
-      [Rarity.UNIQUE]: 0.9,
-      [Rarity.LEGENDARY]: 1.0,
-      [Rarity.HATCH]: 0.3,
-      [Rarity.SPECIAL]: 0.5
-    }
     for (let i = 0; i < MAX_PROPOSITIONS; i++) {
       if (i < propositions.length && propositions[i]) {
         const data = getPokemonData(propositions[i])
@@ -1391,8 +1390,8 @@ export class TrainingEnv {
     // LOCK_SHOP — always valid during normal shop phase
     mask[TrainingAction.LOCK_SHOP] = 1
 
-    // BUY actions (slots 0-4; BUY_5 mask gated until obs expansion in Phase 3.2)
-    for (let i = 0; i < 5; i++) {
+    // BUY actions (all 6 shop slots)
+    for (let i = 0; i < 6; i++) {
       const pkm = agent.shop[i]
       if (pkm && pkm !== Pkm.DEFAULT) {
         const cost = getBuyPrice(pkm, this.state.specialGameRule)
