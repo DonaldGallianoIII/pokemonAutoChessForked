@@ -55,11 +55,12 @@ OFF_OPPONENTS = OFF_GAME + OBS_GAME_INFO                          # 500
 OFF_PROPOSITIONS = OFF_OPPONENTS + OBS_OPPONENT_COUNT * OBS_OPPONENT_FEATURES  # 570
 
 # Reward thresholds for fight-result inference.
-# The base reward is WIN=+0.5, LOSS=-0.3, DRAW=0.0.  Shaped bonuses (synergy
-# delta, enemy kills, HP preservation, interest) add small positive amounts on
-# top, so a reward >= 0.4 is reliably a win, <= -0.2 reliably a loss, and
-# anything in between is a draw.
-_WIN_THRESHOLD = 0.4
+# Base rewards: WIN=+0.6, LOSS=-0.5, DRAW=0.0, plus a +0.12 survival bonus for
+# every alive player.  Shaped bonuses (synergy delta, enemy kills, HP
+# preservation, interest) add small positive amounts on top.
+# Win floor  = 0.6 + 0.12 = 0.72, so >= 0.5 is reliably a win.
+# Loss ceil  = -0.5 + 0.12 = -0.38, so <= -0.2 is reliably a loss.
+_WIN_THRESHOLD = 0.5
 _LOSS_THRESHOLD = -0.2
 
 
