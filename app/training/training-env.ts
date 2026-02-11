@@ -38,6 +38,7 @@ import {
 import {
   CraftableItemsNoScarves,
   Item,
+  ItemComponents,
   ItemComponentsNoFossilOrScarf,
   ItemComponentsNoScarf
 } from "../types/enum/Item"
@@ -865,6 +866,24 @@ export class TrainingEnv {
       if (!target) {
         remaining.push(item)
         continue
+      }
+
+      // Item combination: if incoming item is a basic component and the unit
+      // already has a basic component, combine them into a crafted item
+      // (matches real game behavior from OnDragDropItemCommand)
+      const isBasic = ItemComponents.includes(item)
+      if (isBasic) {
+        const existingComponent = Array.from(target.items.values()).find(
+          (i) => ItemComponents.includes(i as Item)
+        ) as Item | undefined
+        if (existingComponent) {
+          const crafted = findRecipeResult(item, existingComponent)
+          if (crafted) {
+            target.items.delete(existingComponent)
+            target.addItem(crafted, player)
+            continue
+          }
+        }
       }
 
       target.addItem(item, player)
