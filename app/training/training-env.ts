@@ -75,9 +75,11 @@ import {
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
+  GOLD_EXCESS_THRESHOLD,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
   REWARD_BUY_EVOLUTION,
+  REWARD_GOLD_EXCESS_PENALTY,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
@@ -1219,6 +1221,17 @@ export class TrainingEnv {
       const lastHistory = player.history.at(-1)
       if (lastHistory?.result === BattleResult.WIN) {
         rewards.set(id, (rewards.get(id) ?? 0) + (player.life / 100) * REWARD_HP_SCALE)
+      }
+    })
+
+    // 6.5: Gold hoarding penalty — discourage holding gold beyond the interest cap + level-up buffer.
+    // Interest maxes out at 50g held; 70g threshold gives room to save for a level-up.
+    // Applied at end of stage (before income is added) so it captures the decision to hoard.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const excess = player.money - GOLD_EXCESS_THRESHOLD
+      if (excess > 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + excess * REWARD_GOLD_EXCESS_PENALTY)
       }
     })
 

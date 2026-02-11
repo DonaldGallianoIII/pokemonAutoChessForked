@@ -133,6 +133,11 @@ export const REWARD_KEEP_LEGENDARY = 0.007
 export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
 export const REWARD_BUY_EVOLUTION = 0.20     // buying 3rd copy (triggers evolution)
 
+// Gold hoarding penalty: applied per excess gold above threshold at end of each stage.
+// Interest caps at 50g held, plus 20g padding for saving toward a level-up = 70g threshold.
+export const GOLD_EXCESS_THRESHOLD = 70
+export const REWARD_GOLD_EXCESS_PENALTY = -0.02 // per gold above threshold
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8
