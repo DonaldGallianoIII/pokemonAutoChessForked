@@ -117,6 +117,15 @@ export interface StepResult {
     boardSize: number
     synergyCount: number
     itemsHeld: number
+    level: number
+    maxTeamSize: number
+    exp: number
+    expNeeded: number
+    shop: (string | null)[]
+    board: { name: string; x: number; y: number; stars: number; items: string[] }[]
+    bench: { name: string; x: number; stars: number; items: string[] }[]
+    synergies: { name: string; count: number; threshold: number }[]
+    items: string[]
   }
 }
 
@@ -1951,6 +1960,48 @@ export class TrainingEnv {
       })
     }
 
+    // Build detailed board/bench/shop/synergy arrays for replay debugging
+    const boardUnits: StepResult["info"]["board"] = []
+    const benchUnits: StepResult["info"]["bench"] = []
+    const shopSlots: (string | null)[] = []
+    const activeSynergies: StepResult["info"]["synergies"] = []
+    const heldItems: string[] = []
+
+    if (agent) {
+      // Board + bench units
+      agent.board.forEach((pokemon) => {
+        const items = Array.from(pokemon.items.values()) as string[]
+        if (pokemon.positionY > 0) {
+          boardUnits.push({ name: pokemon.name, x: pokemon.positionX, y: pokemon.positionY, stars: pokemon.stars, items })
+        } else {
+          benchUnits.push({ name: pokemon.name, x: pokemon.positionX, stars: pokemon.stars, items })
+        }
+      })
+
+      // Shop slots
+      for (let i = 0; i < 6; i++) {
+        const pkm = agent.shop[i]
+        shopSlots.push(pkm && pkm !== Pkm.DEFAULT ? pkm : null)
+      }
+
+      // Active synergies (with threshold met)
+      agent.synergies.forEach((count, synergy) => {
+        if (count > 0) {
+          const triggers = SynergyTriggers[synergy as Synergy]
+          const threshold = (triggers && triggers.length > 0) ? triggers[0] : 0
+          activeSynergies.push({ name: synergy as string, count, threshold })
+        }
+      })
+      activeSynergies.sort((a, b) => b.count - a.count)
+
+      // Held items
+      for (let i = 0; i < agent.items.length; i++) {
+        heldItems.push(agent.items[i] as string)
+      }
+    }
+
+    const level = agent?.experienceManager?.level ?? 1
+
     return {
       stage: this.state.stageLevel,
       phase:
@@ -1969,7 +2020,16 @@ export class TrainingEnv {
       gold: agent?.money ?? 0,
       boardSize: agent?.boardSize ?? 0,
       synergyCount,
-      itemsHeld: agent?.items.length ?? 0
+      itemsHeld: agent?.items.length ?? 0,
+      level,
+      maxTeamSize: getMaxTeamSize(level, this.state.specialGameRule),
+      exp: agent?.experienceManager?.experience ?? 0,
+      expNeeded: agent?.experienceManager?.expNeeded ?? 0,
+      shop: shopSlots,
+      board: boardUnits,
+      bench: benchUnits,
+      synergies: activeSynergies,
+      items: heldItems
     }
   }
 

@@ -13,11 +13,9 @@ Prerequisites:
        python training/replay.py path/to/checkpoint.zip
 
 For each step prints:
-  Stage {s} | Turn {n} | Gold: {g} | Board: {b}/{max} | HP: {hp} | Action: {name} | {detail}
+  Stage {s} | Turn {n} | Lv {lv} | Gold: {g} | Board: {b}/{max} | HP: {hp} | Action: {name} | {detail}
 
-After each fight (END_TURN) prints a summary line:
-  === FIGHT: Stage {s} | Result: WIN/LOSS/DRAW | HP: {hp} | Rank: {rank} ===
-
+After each fight (END_TURN) prints board state, synergies, and a fight summary.
 At game end prints final stats.
 """
 
@@ -28,138 +26,152 @@ import time
 import numpy as np
 import requests
 
-# ---------------------------------------------------------------------------
-# Observation layout constants (must match training-config.ts)
-# ---------------------------------------------------------------------------
-OBS_PLAYER_STATS = 14
-OBS_SHOP_SLOTS = 6
-OBS_SHOP_FEATURES = 9
-OBS_BOARD_SLOTS = 32
-OBS_BOARD_FEATURES = 12
-OBS_HELD_ITEMS = 10
-OBS_SYNERGIES = 31
-OBS_GAME_INFO = 7
-OBS_OPPONENT_COUNT = 7
-OBS_OPPONENT_FEATURES = 10
-OBS_PROPOSITION_SLOTS = 6
-OBS_PROPOSITION_FEATURES = 7
 
-# Derived offsets
-OFF_PLAYER = 0
-OFF_SHOP = OFF_PLAYER + OBS_PLAYER_STATS                          # 14
-OFF_BOARD = OFF_SHOP + OBS_SHOP_SLOTS * OBS_SHOP_FEATURES         # 68
-OFF_ITEMS = OFF_BOARD + OBS_BOARD_SLOTS * OBS_BOARD_FEATURES      # 452
-OFF_SYNERGIES = OFF_ITEMS + OBS_HELD_ITEMS                        # 462
-OFF_GAME = OFF_SYNERGIES + OBS_SYNERGIES                          # 493
-OFF_OPPONENTS = OFF_GAME + OBS_GAME_INFO                          # 500
-OFF_PROPOSITIONS = OFF_OPPONENTS + OBS_OPPONENT_COUNT * OBS_OPPONENT_FEATURES  # 570
-
+# ---------------------------------------------------------------------------
 # Reward thresholds for fight-result inference.
-# Base rewards: WIN=+0.6, LOSS=-0.5, DRAW=0.0, plus a +0.12 survival bonus for
-# every alive player.  Shaped bonuses (synergy delta, enemy kills, HP
-# preservation, interest) add small positive amounts on top.
+# Base rewards: WIN=+0.6, LOSS=-0.5, DRAW=0.0, plus a +0.12 survival bonus.
 # Any positive reward is a win, any negative is a loss, zero is a draw.
+# ---------------------------------------------------------------------------
 _WIN_THRESHOLD = 0.0
 _LOSS_THRESHOLD = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Action decoding
+# Formatting helpers
 # ---------------------------------------------------------------------------
 
-def _grid_coords(cell: int) -> tuple[int, int]:
-    """Convert cell index (0-31) to (x, y) board coordinates."""
-    return cell % 8, cell // 8
+def _star_str(stars: int) -> str:
+    """Render star level as unicode stars."""
+    return "\u2605" * stars
 
 
-def decode_action(action: int, obs: np.ndarray) -> tuple[str, str]:
-    """Return (action_name, detail) for a given action index.
+def _fmt_unit(u: dict, show_pos: bool = True) -> str:
+    """Format a single unit dict from info.board / info.bench."""
+    name = u["name"]
+    stars = _star_str(u.get("stars", 1))
+    items = u.get("items", [])
+    parts = [f"{name} {stars}"]
+    if show_pos:
+        parts.append(f"({u['x']},{u['y']})")
+    else:
+        parts.append(f"(bench {u['x']})")
+    if items:
+        parts.append(f"[{', '.join(items)}]")
+    return " ".join(parts)
 
-    Uses the observation vector to enrich BUY actions with the shop slot's
-    species index (the best info available without a server-side name table).
-    """
+
+def _print_board_state(info: dict):
+    """Print a full snapshot of the agent's board, bench, shop, synergies, items."""
+    level = info.get("level", "?")
+    exp = info.get("exp", 0)
+    exp_needed = info.get("expNeeded", 0)
+    max_team = info.get("maxTeamSize", "?")
+    board = info.get("board", [])
+    bench = info.get("bench", [])
+    shop = info.get("shop", [])
+    synergies = info.get("synergies", [])
+    items = info.get("items", [])
+
+    print(f"  --- Board State (Lv {level}, exp {exp}/{exp_needed}, team cap {max_team}) ---")
+
+    # Board units grouped by row (y=3 front, y=1 back)
+    if board:
+        by_row: dict[int, list[dict]] = {}
+        for u in board:
+            by_row.setdefault(u["y"], []).append(u)
+        for y in sorted(by_row.keys(), reverse=True):
+            row_label = {3: "front", 2: "mid  ", 1: "back "}.get(y, f"y={y}  ")
+            units_str = "  ".join(_fmt_unit(u) for u in sorted(by_row[y], key=lambda u: u["x"]))
+            print(f"    {row_label}: {units_str}")
+    else:
+        print("    (empty board)")
+
+    # Bench
+    if bench:
+        bench_str = "  ".join(_fmt_unit(u, show_pos=False) for u in sorted(bench, key=lambda u: u["x"]))
+        print(f"    bench: {bench_str}")
+
+    # Active synergies
+    if synergies:
+        syn_parts = []
+        for s in synergies:
+            active = s["count"] >= s["threshold"] and s["threshold"] > 0
+            marker = "+" if active else " "
+            syn_parts.append(f"{s['name']}:{s['count']}/{s['threshold']}{marker}")
+        print(f"    synergies: {', '.join(syn_parts)}")
+
+    # Held items
+    if items:
+        print(f"    items: {', '.join(items)}")
+
+    # Shop
+    shop_parts = []
+    for i, s in enumerate(shop):
+        shop_parts.append(s if s else "---")
+    print(f"    shop: [{' | '.join(shop_parts)}]")
+
+    print()
+
+
+def _decode_action(action: int, info: dict) -> tuple[str, str]:
+    """Return (action_name, detail) using rich info from the server."""
+    shop = info.get("shop", [])
+    board = info.get("board", [])
+    bench = info.get("bench", [])
+
+    # Build lookup of units by position for SELL
+    unit_at: dict[tuple[int, int], dict] = {}
+    for u in board:
+        unit_at[(u["x"], u["y"])] = u
+    for u in bench:
+        unit_at[(u["x"], 0)] = u
+
     if 0 <= action <= 5:
         slot = action
-        # Shop slot species index lives at OFF_SHOP + slot*9 + 1
-        species_raw = obs[OFF_SHOP + slot * OBS_SHOP_FEATURES + 1]
-        cost_raw = obs[OFF_SHOP + slot * OBS_SHOP_FEATURES + 3]
-        cost = int(round(cost_raw * 10))
-        if species_raw > 0:
-            detail = f"shop[{slot}] species={species_raw:.4f} cost={cost}g"
-        else:
-            detail = f"shop[{slot}] (empty)"
-        return f"BUY slot {slot}", detail
+        name = shop[slot] if slot < len(shop) and shop[slot] else "(empty)"
+        return f"BUY slot {slot}", name
 
     if action == 6:
         return "REFRESH", "reroll shop"
     if action == 7:
-        return "LEVEL UP", "spend 4g for +4 exp"
+        exp = info.get("exp", "?")
+        exp_needed = info.get("expNeeded", "?")
+        return "LEVEL UP", f"4g -> +4 exp ({exp}/{exp_needed})"
     if action == 8:
-        locked = obs[OFF_PLAYER + 11]  # shopLocked flag
-        state = "locked" if locked > 0.5 else "unlocked"
-        return "LOCK SHOP", f"toggle (was {state})"
+        return "LOCK SHOP", "toggle"
     if action == 9:
-        return "END TURN", "fight phase begins"
+        return "END TURN", "-> fight"
 
     if 10 <= action <= 41:
         cell = action - 10
-        x, y = _grid_coords(cell)
+        x, y = cell % 8, cell // 8
         label = "board" if y >= 1 else "bench"
-        return f"MOVE to ({x},{y})", f"place unit on {label}"
+        return f"MOVE to ({x},{y})", label
 
     if 42 <= action <= 73:
         cell = action - 42
-        x, y = _grid_coords(cell)
+        x, y = cell % 8, cell // 8
         label = "board" if y >= 1 else "bench"
-        # Check if there's a unit at that cell
-        species_raw = obs[OFF_BOARD + cell * OBS_BOARD_FEATURES + 1]
-        if species_raw > 0:
-            stars = int(round(obs[OFF_BOARD + cell * OBS_BOARD_FEATURES + 2] * 3))
-            detail = f"unit at ({x},{y}) {label} species={species_raw:.4f} {'*' * stars}"
-        else:
-            detail = f"({x},{y}) {label}"
-        return f"SELL at ({x},{y})", detail
+        u = unit_at.get((x, y))
+        if u:
+            return f"SELL at ({x},{y})", f"{u['name']} {_star_str(u.get('stars',1))} ({label})"
+        return f"SELL at ({x},{y})", label
 
     if 74 <= action <= 79:
         slot = action - 74
-        return f"REMOVE SHOP slot {slot}", f"discard shop[{slot}]"
+        name = shop[slot] if slot < len(shop) and shop[slot] else "(empty)"
+        return f"REMOVE SHOP slot {slot}", name
 
     if 80 <= action <= 85:
         slot = action - 80
-        # Proposition info at OFF_PROPOSITIONS + slot*7
-        prop_base = OFF_PROPOSITIONS + slot * OBS_PROPOSITION_FEATURES
-        species_raw = obs[prop_base]
-        item_raw = obs[prop_base + 6]
-        parts = []
-        if species_raw > 0:
-            parts.append(f"species={species_raw:.4f}")
-        if item_raw > 0:
-            parts.append(f"item={item_raw:.4f}")
-        detail = " ".join(parts) if parts else "(empty)"
-        return f"PICK proposition {slot}", detail
+        return f"PICK proposition {slot}", ""
 
     if 86 <= action <= 91:
         pair = action - 86
-        return f"COMBINE items pair {pair}", f"craft item pair #{pair}"
+        items = info.get("items", [])
+        return f"COMBINE items pair {pair}", f"held: {items}" if items else ""
 
     return f"UNKNOWN({action})", ""
-
-
-# ---------------------------------------------------------------------------
-# Observation helpers
-# ---------------------------------------------------------------------------
-
-def read_player(obs: np.ndarray) -> dict:
-    """Extract player stats from observation."""
-    return {
-        "life": obs[0] * 100,
-        "gold": obs[1] * 100,
-        "level": obs[2] * 9,
-        "board_size": obs[7] * 9,
-        "rank": obs[6] * 8,
-        "stage": obs[OFF_GAME] * 50,
-        "max_team": obs[OFF_GAME + 6] * 9,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -200,41 +212,39 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
 
     total_reward = 0.0
     total_steps = 0
-    turn_action_num = 0        # actions within the current turn
-    prev_life = info.get("life", 100)
+    turn_action_num = 0
     prev_stage = info.get("stage", 1)
     fights = 0
     wins = 0
     losses = 0
     draws = 0
 
-    header = (
-        f"{'Stage':>5} | {'Turn':>4} | {'Gold':>6} | {'Board':>9} | "
-        f"{'HP':>5} | {'Action':<24} | Detail"
+    print(
+        f"{'Stage':>5} | {'Turn':>4} | {'Lv':>2} | {'Gold':>5} | "
+        f"{'Board':>9} | {'HP':>5} | {'Action':<24} | Detail"
     )
-    print(header)
-    print("-" * len(header))
+    print("-" * 95)
 
     while not done:
         masks = env.unwrapped.action_masks()
         action, _ = model.predict(obs, deterministic=deterministic, action_masks=masks)
         action = int(action)
 
-        # Decode action BEFORE stepping (uses current obs for context)
-        action_name, detail = decode_action(action, obs)
-
-        # Read pre-step state from info (server provides these every step)
+        # Read pre-step state from info
         stage = info.get("stage", prev_stage)
-        life = info.get("life", prev_life)
+        life = info.get("life", 0)
         gold = info.get("money", info.get("gold", 0))
         board_size = info.get("boardSize", 0)
-        p = read_player(obs)
-        max_team = int(round(p["max_team"]))
+        level = info.get("level", 1)
+        max_team = info.get("maxTeamSize", level)
+
+        # Decode action using rich info (names, not indices)
+        action_name, detail = _decode_action(action, info)
 
         turn_action_num += 1
 
         print(
-            f"  {stage:3d}   | {turn_action_num:4d} | {gold:5.0f}g | "
+            f"  {stage:3d}   | {turn_action_num:4d} | {level:2d} | {gold:4.0f}g | "
             f"{board_size:3d}/{max_team:<3d}   | {life:5.0f} | "
             f"{action_name:<24} | {detail}"
         )
@@ -245,14 +255,14 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
         total_steps += 1
         done = terminated or truncated
 
-        # After END_TURN the fight runs synchronously; detect result
+        # After END_TURN: print board state + fight summary
         if action == 9:  # END_TURN
             new_life = info.get("life", life)
             new_stage = info.get("stage", stage)
             new_rank = info.get("rank", "?")
+            new_level = info.get("level", level)
             fights += 1
 
-            # Infer fight result from reward
             if reward > _WIN_THRESHOLD:
                 result = "WIN"
                 wins += 1
@@ -263,20 +273,26 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
                 result = "DRAW"
                 draws += 1
 
+            hp_delta = new_life - life
+            hp_str = f"{hp_delta:+.0f}" if hp_delta != 0 else "0"
+
             print(
                 f"  === FIGHT: Stage {stage} | Result: {result} "
-                f"(r={reward:+.3f}) | HP: {new_life:.0f} | Rank: {new_rank} ==="
+                f"(r={reward:+.3f}) | HP: {new_life:.0f} ({hp_str}) "
+                f"| Rank: {new_rank} ==="
             )
-            print()
 
-            prev_life = new_life
+            # Print full board state for the upcoming turn
+            _print_board_state(info)
+
             prev_stage = new_stage
-            turn_action_num = 0  # reset for next turn
+            turn_action_num = 0
 
     # ----- Game over summary -----
     final_rank = info.get("rank", "?")
     final_stage = info.get("stage", "?")
     final_life = info.get("life", 0)
+    final_level = info.get("level", "?")
 
     print()
     print("=" * 60)
@@ -284,12 +300,17 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     print("=" * 60)
     print(f"  Final Rank:     {final_rank}")
     print(f"  Final Stage:    {final_stage}")
+    print(f"  Final Level:    {final_level}")
     print(f"  Final HP:       {final_life:.0f}")
     print(f"  Total Steps:    {total_steps}")
     print(f"  Total Reward:   {total_reward:+.3f}")
     print(f"  Fights:         {fights}  (W:{wins} / L:{losses} / D:{draws})")
     if fights > 0:
         print(f"  Win Rate:       {wins / fights:.1%}")
+
+    # Final board state
+    _print_board_state(info)
+
     print("=" * 60)
 
     env.close()
