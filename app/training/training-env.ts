@@ -80,6 +80,7 @@ import {
   REWARD_PER_ENEMY_KILL,
   REWARD_PER_KILL,
   REWARD_PER_LOSS,
+  REWARD_PER_SURVIVE_ROUND,
   REWARD_PER_WIN,
   REWARD_PLACEMENT_OFFSET,
   REWARD_PLACEMENT_SCALE,
@@ -986,6 +987,12 @@ export class TrainingEnv {
       } else {
         rewards.set(id, 0)
       }
+    })
+
+    // Survival bonus: every alive player gets a flat bonus each round
+    this.state.players.forEach((player, id) => {
+      if (!player.alive) return
+      rewards.set(id, (rewards.get(id) ?? 0) + REWARD_PER_SURVIVE_ROUND)
     })
 
     // ── Shaped rewards (Phase 6) ──────────────────────────────────────

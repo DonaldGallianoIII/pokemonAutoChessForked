@@ -78,8 +78,8 @@ export enum TrainingAction {
 export const TOTAL_ACTIONS = 92
 
 // Reward shaping
-export const REWARD_PER_WIN = 0.5
-export const REWARD_PER_LOSS = -0.3
+export const REWARD_PER_WIN = 0.6
+export const REWARD_PER_LOSS = -0.5
 export const REWARD_PER_DRAW = 0.0
 export const REWARD_PER_KILL = -2.0 // penalty when agent dies
 export const REWARD_PLACEMENT_SCALE = 2.0 // final reward = (9 - rank) * scale - offset
@@ -87,9 +87,10 @@ export const REWARD_PLACEMENT_OFFSET = 6.0
 
 // Shaped rewards (Phase 6)
 export const REWARD_INTEREST_BONUS = 0.05   // per interest gold earned (with board guard)
-export const REWARD_SYNERGY_THRESHOLD = 0.1 // per newly activated synergy threshold
+export const REWARD_SYNERGY_THRESHOLD = 0.3 // per newly activated synergy threshold
 export const REWARD_PER_ENEMY_KILL = 0.02   // per enemy unit killed in combat
 export const REWARD_HP_SCALE = 0.005        // HP preservation bonus on win
+export const REWARD_PER_SURVIVE_ROUND = 0.12 // bonus for every alive player each round
 
 // Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
 // When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
