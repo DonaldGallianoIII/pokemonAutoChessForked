@@ -77,11 +77,13 @@ import {
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
   REWARD_BUY_EVOLUTION,
+  REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
   REWARD_INTEREST_BONUS,
+  REWARD_SELL_EVOLVED,
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
   REWARD_PER_KILL,
@@ -147,6 +149,8 @@ export class TrainingEnv {
   agentId!: string
   actionsThisTurn = 0
   consecutiveMoves = 0
+  lastMoveCell = -1  // last MOVE target cell, used to prevent back-and-forth oscillation
+  lastSoldStars = 0  // stars of the last sold unit, for sell penalty
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
   prevActiveSynergyCount = 0
@@ -284,6 +288,8 @@ export class TrainingEnv {
 
     this.actionsThisTurn = 0
     this.consecutiveMoves = 0
+    this.lastMoveCell = -1
+    this.lastSoldStars = 0
     this.totalSteps = 0
     this.lastBattleResult = null
     this.prevActiveSynergyCount = 0
@@ -354,15 +360,36 @@ export class TrainingEnv {
         reward += REWARD_BUY_DUPLICATE
       }
 
-      // Move fidget penalty: 2 free moves, then -0.03 per consecutive move
+      // Move fidget penalty: 2 free moves, then penalty per consecutive move
       const isMove = action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31
-      if (isMove) {
+      if (isMove && actionExecuted) {
+        // Track the target cell so we can block oscillation in the action mask
+        const moveCell = action - TrainingAction.MOVE_0
+        this.lastMoveCell = moveCell
         this.consecutiveMoves++
         if (this.consecutiveMoves > MOVE_FIDGET_GRACE) {
           reward += REWARD_MOVE_FIDGET
         }
+      } else if (isMove && !actionExecuted) {
+        // Failed move still counts as consecutive
+        this.consecutiveMoves++
       } else {
         this.consecutiveMoves = 0
+        this.lastMoveCell = -1
+      }
+
+      // Sell penalty: penalize selling evolved (2+ star) units
+      const isSell = action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31
+      if (isSell && actionExecuted) {
+        // Check if the unit that was just sold had 2+ stars
+        // (unit is gone now, but we can check from pre-sell snapshot)
+        // We'll detect this from the sell action itself
+        reward += this.lastSoldStars >= 2 ? REWARD_SELL_EVOLVED : 0
+      }
+
+      // Level-up reward
+      if (action === TrainingAction.LEVEL_UP && actionExecuted) {
+        reward += REWARD_LEVEL_UP
       }
 
       // Per-step bonus for keeping unique/legendary units on board
@@ -387,6 +414,7 @@ export class TrainingEnv {
           this.state.shop.assignShop(agent, false, this.state)
           this.actionsThisTurn = 0
           this.consecutiveMoves = 0
+          this.lastMoveCell = -1
         }
         // If at a later stage with propositions (uniques, additionals), just continue the turn
         // The propositions have been cleared so normal PICK actions resume
@@ -457,6 +485,7 @@ export class TrainingEnv {
         this.advanceToNextPickPhase()
         this.actionsThisTurn = 0
         this.consecutiveMoves = 0
+        this.lastMoveCell = -1
       }
     }
 
@@ -660,6 +689,9 @@ export class TrainingEnv {
       if (pokemon === targetPokemon) targetId = key
     })
     if (!targetId) return false
+
+    // Track stars for sell penalty reward
+    this.lastSoldStars = targetPokemon.stars ?? 1
 
     player.board.delete(targetId)
     this.state.shop.releasePokemon(targetPokemon.name, player, this.state)
@@ -1708,12 +1740,12 @@ export class TrainingEnv {
           if (p.name === pkm) copyCount++
         })
         obs.push(1) // hasUnit
-        obs.push(getPkmSpeciesIndex(pkm)) // speciesIndex
-        obs.push(rarityMap[data.rarity] ?? 0) // rarity
-        obs.push(getBuyPrice(pkm, this.state.specialGameRule) / 10) // cost
-        obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
-        obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
-        obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+        obs.push(clamp01(getPkmSpeciesIndex(pkm))) // speciesIndex
+        obs.push(clamp01(rarityMap[data.rarity] ?? 0)) // rarity
+        obs.push(clamp01(getBuyPrice(pkm, this.state.specialGameRule) / 20)) // cost (was /10, legendary=20)
+        obs.push(clamp01(types[0] ? getSynergyIndex(types[0]) : 0)) // type1
+        obs.push(clamp01(types[1] ? getSynergyIndex(types[1]) : 0)) // type2
+        obs.push(clamp01(types[2] ? getSynergyIndex(types[2]) : 0)) // type3
         obs.push(0) // type4 (always 0, no items on shop pokemon)
         obs.push(copyCount >= 2 ? 1 : 0) // isEvoPossible
       } else {
@@ -1730,17 +1762,17 @@ export class TrainingEnv {
           const data = getPokemonData(pokemon.name)
           const types = Array.from(pokemon.types.values()) as Synergy[]
           obs.push(1) // hasUnit
-          obs.push(getPkmSpeciesIndex(pokemon.name)) // speciesIndex
-          obs.push(pokemon.stars / 3) // stars
-          obs.push(rarityMap[data.rarity] ?? 0) // rarity
-          obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
-          obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
-          obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+          obs.push(clamp01(getPkmSpeciesIndex(pokemon.name))) // speciesIndex
+          obs.push(clamp01(pokemon.stars / 3)) // stars
+          obs.push(clamp01(rarityMap[data.rarity] ?? 0)) // rarity
+          obs.push(clamp01(types[0] ? getSynergyIndex(types[0]) : 0)) // type1
+          obs.push(clamp01(types[1] ? getSynergyIndex(types[1]) : 0)) // type2
+          obs.push(clamp01(types[2] ? getSynergyIndex(types[2]) : 0)) // type3
           obs.push(0) // type4 (stone types only during simulation)
-          obs.push(pokemon.atk / 50) // atk
-          obs.push(pokemon.hp / 500) // hp
-          obs.push(pokemon.range / 4) // range
-          obs.push(pokemon.items.size / 3) // numItems
+          obs.push(clamp01(pokemon.atk / 100)) // atk (was /50, can exceed)
+          obs.push(clamp01(pokemon.hp / 1000)) // hp (was /500, can exceed)
+          obs.push(clamp01(pokemon.range / 5)) // range (was /4)
+          obs.push(clamp01(pokemon.items.size / 3)) // numItems
         } else {
           obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 12 zeros
         }
@@ -1751,7 +1783,7 @@ export class TrainingEnv {
     const heldItems = Array.from(agent.items.values()) as Item[]
     for (let i = 0; i < OBS_HELD_ITEMS; i++) {
       if (i < heldItems.length) {
-        obs.push(getItemIndex(heldItems[i]))
+        obs.push(clamp01(getItemIndex(heldItems[i])))
       } else {
         obs.push(0)
       }
@@ -1760,32 +1792,32 @@ export class TrainingEnv {
     // ── Synergies (31 values, normalized) ─────────────────────────────
     for (const synergy of SynergyArray) {
       const val = agent.synergies.get(synergy) ?? 0
-      obs.push(val / 10)
+      obs.push(clamp01(val / 10))
     }
 
     // ── Game info (7) ──────────────────────────────────────────────────
-    obs.push(this.state.stageLevel / 50)
-    obs.push(this.state.phase / 2)
+    obs.push(clamp01(this.state.stageLevel / 50))
+    obs.push(clamp01(this.state.phase / 2))
     const playersAlive = values(this.state.players).filter(
       (p) => p.alive
     ).length
-    obs.push(playersAlive / 8)
+    obs.push(clamp01(playersAlive / 8))
     obs.push(
       agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0
         ? 1
         : 0
     ) // hasPropositions
     obs.push(
-      this.state.weather
+      clamp01(this.state.weather
         ? getWeatherIndex(this.state.weather as Weather)
-        : 0
+        : 0)
     ) // weatherIndex
     obs.push(this.state.stageLevel in PVEStages ? 1 : 0) // isPVE
     obs.push(
-      getMaxTeamSize(
+      clamp01(getMaxTeamSize(
         agent.experienceManager.level,
         this.state.specialGameRule
-      ) / 9
+      ) / 9)
     ) // maxTeamSize
 
     // ── Opponents (7 × 10 features = 70) ──────────────────────────────
@@ -1795,12 +1827,12 @@ export class TrainingEnv {
     for (let i = 0; i < OBS_OPPONENT_COUNT; i++) {
       if (i < opponents.length) {
         const opp = opponents[i]
-        obs.push(opp.life / 100)
-        obs.push(opp.rank / 8)
-        obs.push(opp.experienceManager.level / 9)
-        obs.push(opp.money / 100)
-        obs.push(opp.streak / 10)
-        obs.push(opp.boardSize / 9)
+        obs.push(clamp01(opp.life / 100))
+        obs.push(clamp01(opp.rank / 8))
+        obs.push(clamp01(opp.experienceManager.level / 9))
+        obs.push(clamp01(opp.money / 300)) // was /100, bots can hoard too
+        obs.push(clamp01((opp.streak + 20) / 40)) // was /10, match player stat encoding
+        obs.push(clamp01(opp.boardSize / 9))
         // Top 2 synergies by count
         let top1Syn: Synergy | null = null
         let top1Count = 0
@@ -1817,10 +1849,10 @@ export class TrainingEnv {
             top2Count = count
           }
         })
-        obs.push(top1Syn ? getSynergyIndex(top1Syn) : 0)
-        obs.push(top1Count / 10)
-        obs.push(top2Syn ? getSynergyIndex(top2Syn) : 0)
-        obs.push(top2Count / 10)
+        obs.push(clamp01(top1Syn ? getSynergyIndex(top1Syn) : 0))
+        obs.push(clamp01(top1Count / 10))
+        obs.push(clamp01(top2Syn ? getSynergyIndex(top2Syn) : 0))
+        obs.push(clamp01(top2Count / 10))
       } else {
         obs.push(0, 0, 0, 0, 0, 0, 0, 0, 0, 0) // 10 zeros
       }
@@ -1839,21 +1871,21 @@ export class TrainingEnv {
         obs.push(0) // type2
         obs.push(0) // type3
         obs.push(0) // type4
-        obs.push(getItemIndex(agent.itemsProposition[i])) // itemIndex
+        obs.push(clamp01(getItemIndex(agent.itemsProposition[i]))) // itemIndex
       } else if (i < propositions.length && propositions[i]) {
         const data = getPokemonData(propositions[i])
         const types = data.types ?? []
-        obs.push(getPkmSpeciesIndex(propositions[i])) // speciesIndex
-        obs.push(rarityMap[data.rarity] ?? 0) // rarity
-        obs.push(types[0] ? getSynergyIndex(types[0]) : 0) // type1
-        obs.push(types[1] ? getSynergyIndex(types[1]) : 0) // type2
-        obs.push(types[2] ? getSynergyIndex(types[2]) : 0) // type3
+        obs.push(clamp01(getPkmSpeciesIndex(propositions[i]))) // speciesIndex
+        obs.push(clamp01(rarityMap[data.rarity] ?? 0)) // rarity
+        obs.push(clamp01(types[0] ? getSynergyIndex(types[0]) : 0)) // type1
+        obs.push(clamp01(types[1] ? getSynergyIndex(types[1]) : 0)) // type2
+        obs.push(clamp01(types[2] ? getSynergyIndex(types[2]) : 0)) // type3
         obs.push(0) // type4
         obs.push(
-          agent.itemsProposition.length > i &&
+          clamp01(agent.itemsProposition.length > i &&
             agent.itemsProposition[i] != null
             ? getItemIndex(agent.itemsProposition[i])
-            : 0
+            : 0)
         ) // itemIndex (0 if no paired item)
       } else {
         obs.push(0, 0, 0, 0, 0, 0, 0) // 7 zeros
@@ -1950,9 +1982,11 @@ export class TrainingEnv {
     }
 
     // MOVE actions — empty cells that a unit could move to
+    // Masks out the last move target to prevent back-and-forth oscillation
     const firstUnit = this.findFirstAvailableUnit(agent)
     if (firstUnit) {
       const sourceY = firstUnit.positionY
+      const sourceCell = firstUnit.positionY * GRID_WIDTH + firstUnit.positionX
       const maxTeamSize = getMaxTeamSize(
         agent.experienceManager.level,
         this.state.specialGameRule
@@ -1962,6 +1996,8 @@ export class TrainingEnv {
         if (this.findPokemonAt(agent, x, y)) continue // occupied
         // Bench → board: only valid if board not full
         if (y >= 1 && sourceY === 0 && agent.boardSize >= maxTeamSize) continue
+        // Block the cell the unit just came from (prevents A→B→A oscillation)
+        if (cell === this.lastMoveCell && this.consecutiveMoves >= 2) continue
         mask[TrainingAction.MOVE_0 + cell] = 1
       }
     }

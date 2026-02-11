@@ -109,7 +109,13 @@ export const REWARD_BENCH_PENALTY = -0.01
 
 // Move fidget penalty: applied per move after MOVE_FIDGET_GRACE free moves in a row
 export const MOVE_FIDGET_GRACE = 2
-export const REWARD_MOVE_FIDGET = -0.03
+export const REWARD_MOVE_FIDGET = -0.08  // was -0.03, increased to punish oscillation loops
+
+// Sell penalty: penalize selling evolved (2-3 star) units
+export const REWARD_SELL_EVOLVED = -0.15
+
+// Level-up reward: small incentive to invest gold in levels
+export const REWARD_LEVEL_UP = 0.10
 
 // Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
 export const REWARD_KEEP_UNIQUE = 0.007
