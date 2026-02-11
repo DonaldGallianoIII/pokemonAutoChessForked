@@ -80,7 +80,7 @@ import {
   REWARD_BUY_EVOLUTION,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
-  REWARD_REROLL_WITH_OPEN_SLOTS,
+  REWARD_REROLL,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
@@ -391,20 +391,21 @@ export class TrainingEnv {
         reward += this.lastSoldStars >= 2 ? REWARD_SELL_EVOLVED : 0
       }
 
-      // Level-up reward
+      // Level-up reward: only when board is reasonably filled
+      // Prevents "level to 9 with 3 units" — no reward if more than 2 slots empty
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
-        reward += REWARD_LEVEL_UP
-      }
-
-      // Reroll reward: incentivize refreshing shop when board has open slots
-      if (action === TrainingAction.REFRESH && actionExecuted) {
         const maxTeamSize = getMaxTeamSize(
           agent.experienceManager.level,
           this.state.specialGameRule
         )
-        if (agent.boardSize < maxTeamSize) {
-          reward += REWARD_REROLL_WITH_OPEN_SLOTS
+        if (agent.boardSize >= maxTeamSize - 2) {
+          reward += REWARD_LEVEL_UP
         }
+      }
+
+      // Reroll reward: unconditional incentive to refresh shop
+      if (action === TrainingAction.REFRESH && actionExecuted) {
+        reward += REWARD_REROLL
       }
 
       // Per-step bonus for keeping unique/legendary units on board
@@ -1359,7 +1360,14 @@ export class TrainingEnv {
         player.pokemonsProposition.length === 0
       ) {
         if (!player.shopLocked) {
+          // Full refresh: release all units and assign new shop
           this.state.shop.assignShop(player, false, this.state)
+        } else {
+          // Locked shop (from REMOVE_SHOP or manual LOCK_SHOP):
+          // Refill only the empty (DEFAULT) slots, keep the units the
+          // player wanted to save. Then unlock for next round.
+          // This matches the real game's game-commands.ts behavior.
+          this.state.shop.refillShop(player, this.state)
           player.shopLocked = false
         }
       }
