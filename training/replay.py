@@ -58,10 +58,9 @@ OFF_PROPOSITIONS = OFF_OPPONENTS + OBS_OPPONENT_COUNT * OBS_OPPONENT_FEATURES  #
 # Base rewards: WIN=+0.6, LOSS=-0.5, DRAW=0.0, plus a +0.12 survival bonus for
 # every alive player.  Shaped bonuses (synergy delta, enemy kills, HP
 # preservation, interest) add small positive amounts on top.
-# Win floor  = 0.6 + 0.12 = 0.72, so >= 0.5 is reliably a win.
-# Loss ceil  = -0.5 + 0.12 = -0.38, so <= -0.2 is reliably a loss.
-_WIN_THRESHOLD = 0.5
-_LOSS_THRESHOLD = -0.2
+# Any positive reward is a win, any negative is a loss, zero is a draw.
+_WIN_THRESHOLD = 0.0
+_LOSS_THRESHOLD = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -254,10 +253,10 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
             fights += 1
 
             # Infer fight result from reward
-            if reward >= _WIN_THRESHOLD:
+            if reward > _WIN_THRESHOLD:
                 result = "WIN"
                 wins += 1
-            elif reward <= _LOSS_THRESHOLD:
+            elif reward < _LOSS_THRESHOLD:
                 result = "LOSS"
                 losses += 1
             else:
