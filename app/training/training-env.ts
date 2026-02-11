@@ -1360,14 +1360,16 @@ export class TrainingEnv {
         player.pokemonsProposition.length === 0
       ) {
         if (!player.shopLocked) {
+          // Full refresh: release all units and assign new shop
           this.state.shop.assignShop(player, false, this.state)
+        } else {
+          // Locked shop (from REMOVE_SHOP or manual LOCK_SHOP):
+          // Refill only the empty (DEFAULT) slots, keep the units the
+          // player wanted to save. Then unlock for next round.
+          // This matches the real game's game-commands.ts behavior.
+          this.state.shop.refillShop(player, this.state)
+          player.shopLocked = false
         }
-        // Always clear the lock between rounds. In the real game, shop lock
-        // is a one-round intent: "keep this shop for now." Next round the
-        // shop refreshes normally unless the player re-locks it.
-        // Bug: REMOVE_SHOP sets shopLocked=true, and without this reset the
-        // shop stayed frozen forever (16 stages with the same stale shop).
-        player.shopLocked = false
       }
     })
 
