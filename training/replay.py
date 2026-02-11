@@ -113,6 +113,36 @@ def _print_board_state(info: dict):
     print()
 
 
+def _print_opponent(info: dict):
+    """Print the opponent's team the agent just fought against."""
+    opp = info.get("opponent")
+    if not opp:
+        return
+
+    name = opp.get("name", "???")
+    opp_level = opp.get("level", "?")
+    opp_life = opp.get("odLife", "?")
+    opp_board = opp.get("board", [])
+
+    print(f"  --- Enemy: {name} (Lv {opp_level}, HP {opp_life}) ---")
+
+    if opp_board:
+        by_row: dict[int, list[dict]] = {}
+        for u in opp_board:
+            by_row.setdefault(u["y"], []).append(u)
+        for y in sorted(by_row.keys(), reverse=True):
+            row_label = {3: "front", 2: "mid  ", 1: "back "}.get(y, f"y={y}  ")
+            units_str = "  ".join(_fmt_unit(u) for u in sorted(by_row[y], key=lambda u: u["x"]))
+            print(f"    {row_label}: {units_str}")
+    else:
+        if opp.get("level", 0) == 0:
+            print("    (PVE encounter)")
+        else:
+            print("    (no board data)")
+
+    print()
+
+
 def _decode_action(action: int, info: dict) -> tuple[str, str]:
     """Return (action_name, detail) using rich info from the server."""
     shop = info.get("shop", [])
@@ -282,7 +312,8 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
                 f"| Rank: {new_rank} ==="
             )
 
-            # Print full board state for the upcoming turn
+            # Print opponent team, then our board state for the upcoming turn
+            _print_opponent(info)
             _print_board_state(info)
 
             prev_stage = new_stage
