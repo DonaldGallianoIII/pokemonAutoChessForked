@@ -68,12 +68,14 @@ import {
   GRID_HEIGHT,
   GRID_WIDTH,
   MAX_PROPOSITIONS,
+  MOVE_FIDGET_GRACE,
   OBS_HELD_ITEMS,
   OBS_OPPONENT_COUNT,
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
   REWARD_BENCH_PENALTY,
+  REWARD_MOVE_FIDGET,
   REWARD_HP_SCALE,
   REWARD_INTEREST_BONUS,
   REWARD_PER_DRAW,
@@ -140,6 +142,7 @@ export class TrainingEnv {
   room!: HeadlessRoom
   agentId!: string
   actionsThisTurn = 0
+  consecutiveMoves = 0
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
   prevActiveSynergyCount = 0
@@ -276,6 +279,7 @@ export class TrainingEnv {
       (StageDuration[this.state.stageLevel] ?? StageDuration.DEFAULT) * 1000
 
     this.actionsThisTurn = 0
+    this.consecutiveMoves = 0
     this.totalSteps = 0
     this.lastBattleResult = null
     this.prevActiveSynergyCount = 0
@@ -322,6 +326,17 @@ export class TrainingEnv {
       const actionExecuted = this.executeAction(action, agent)
       this.actionsThisTurn++
 
+      // Move fidget penalty: 2 free moves, then -0.03 per consecutive move
+      const isMove = action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31
+      if (isMove) {
+        this.consecutiveMoves++
+        if (this.consecutiveMoves > MOVE_FIDGET_GRACE) {
+          reward += REWARD_MOVE_FIDGET
+        }
+      } else {
+        this.consecutiveMoves = 0
+      }
+
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
         actionExecuted &&
@@ -334,6 +349,7 @@ export class TrainingEnv {
           this.state.botManager.updateBots()
           this.state.shop.assignShop(agent, false, this.state)
           this.actionsThisTurn = 0
+          this.consecutiveMoves = 0
         }
         // If at a later stage with propositions (uniques, additionals), just continue the turn
         // The propositions have been cleared so normal PICK actions resume
@@ -400,6 +416,7 @@ export class TrainingEnv {
         // Advance to next PICK phase
         this.advanceToNextPickPhase()
         this.actionsThisTurn = 0
+        this.consecutiveMoves = 0
       }
     }
 

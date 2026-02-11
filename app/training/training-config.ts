@@ -107,6 +107,10 @@ export const TRAINING_AUTO_PLACE = false
 // Bench penalty: applied per bench unit when board has open slots at turn end
 export const REWARD_BENCH_PENALTY = -0.01
 
+// Move fidget penalty: applied per move after MOVE_FIDGET_GRACE free moves in a row
+export const MOVE_FIDGET_GRACE = 2
+export const REWARD_MOVE_FIDGET = -0.03
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8
