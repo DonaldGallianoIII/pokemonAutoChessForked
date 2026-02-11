@@ -80,6 +80,7 @@ import {
   REWARD_BUY_EVOLUTION,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
+  REWARD_REROLL_WITH_OPEN_SLOTS,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
@@ -152,6 +153,7 @@ export class TrainingEnv {
   consecutiveMoves = 0
   lastMoveCell = -1  // last MOVE target cell, used to prevent back-and-forth oscillation
   lastSoldStars = 0  // stars of the last sold unit, for sell penalty
+  lockShopUsedThisTurn = false  // prevent LOCK_SHOP spam (toggle once per turn max)
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
   prevActiveSynergyCount = 0
@@ -291,6 +293,7 @@ export class TrainingEnv {
     this.consecutiveMoves = 0
     this.lastMoveCell = -1
     this.lastSoldStars = 0
+    this.lockShopUsedThisTurn = false
     this.totalSteps = 0
     this.lastBattleResult = null
     this.prevActiveSynergyCount = 0
@@ -393,6 +396,17 @@ export class TrainingEnv {
         reward += REWARD_LEVEL_UP
       }
 
+      // Reroll reward: incentivize refreshing shop when board has open slots
+      if (action === TrainingAction.REFRESH && actionExecuted) {
+        const maxTeamSize = getMaxTeamSize(
+          agent.experienceManager.level,
+          this.state.specialGameRule
+        )
+        if (agent.boardSize < maxTeamSize) {
+          reward += REWARD_REROLL_WITH_OPEN_SLOTS
+        }
+      }
+
       // Per-step bonus for keeping unique/legendary units on board
       agent.board.forEach((pokemon) => {
         if (pokemon.positionY > 0) {
@@ -416,6 +430,7 @@ export class TrainingEnv {
           this.actionsThisTurn = 0
           this.consecutiveMoves = 0
           this.lastMoveCell = -1
+          this.lockShopUsedThisTurn = false
         }
         // If at a later stage with propositions (uniques, additionals), just continue the turn
         // The propositions have been cleared so normal PICK actions resume
@@ -487,6 +502,7 @@ export class TrainingEnv {
         this.actionsThisTurn = 0
         this.consecutiveMoves = 0
         this.lastMoveCell = -1
+        this.lockShopUsedThisTurn = false
       }
     }
 
@@ -526,6 +542,7 @@ export class TrainingEnv {
     // LOCK_SHOP (8)
     if (action === TrainingAction.LOCK_SHOP) {
       agent.shopLocked = !agent.shopLocked
+      this.lockShopUsedThisTurn = true
       return true
     }
     // END_TURN (9)
@@ -1977,8 +1994,10 @@ export class TrainingEnv {
     // END_TURN is always valid
     mask[TrainingAction.END_TURN] = 1
 
-    // LOCK_SHOP — always valid during normal shop phase
-    mask[TrainingAction.LOCK_SHOP] = 1
+    // LOCK_SHOP — valid once per turn (prevents toggle spam)
+    if (!this.lockShopUsedThisTurn) {
+      mask[TrainingAction.LOCK_SHOP] = 1
+    }
 
     // BUY actions (all 6 shop slots)
     for (let i = 0; i < 6; i++) {

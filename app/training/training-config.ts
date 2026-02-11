@@ -12,7 +12,10 @@ import { Weather } from "../types/enum/Weather"
 export const TRAINING_NUM_OPPONENTS = 7
 
 // Max actions the RL agent can take per PICK phase before auto-advancing
-export const TRAINING_MAX_ACTIONS_PER_TURN = 30
+// Reduced from 30 to 15: a productive turn rarely needs more than ~12 actions
+// (buy×3, move×3, reroll×2, level, end_turn). Lower budget forces efficiency
+// and prevents degenerate no-op spam that consumes training signal.
+export const TRAINING_MAX_ACTIONS_PER_TURN = 15
 
 // Delta time (ms) per simulation sub-step during FIGHT phase
 export const TRAINING_SIMULATION_DT = 50
@@ -116,6 +119,9 @@ export const REWARD_SELL_EVOLVED = -0.15
 
 // Level-up reward: small incentive to invest gold in levels
 export const REWARD_LEVEL_UP = 0.10
+
+// Reroll reward: small incentive to refresh shop when board isn't full
+export const REWARD_REROLL_WITH_OPEN_SLOTS = 0.04
 
 // Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
 export const REWARD_KEEP_UNIQUE = 0.007
