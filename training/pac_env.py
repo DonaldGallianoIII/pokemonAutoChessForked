@@ -20,7 +20,7 @@ class PokemonAutoChessEnv(gym.Env):
     """
     Gymnasium environment for Pokemon Auto Chess step-mode training.
 
-    Observation space: Box(low=0, high=1, shape=(obs_size,))
+    Observation space: Box(low=0.0, high=1.0, shape=(obs_size,))
     Action space: Discrete(num_actions)
 
     The agent acts during PICK phases only. Each step is one micro-action
@@ -52,7 +52,7 @@ class PokemonAutoChessEnv(gym.Env):
 
         self.action_space = spaces.Discrete(self.num_actions)
         self.observation_space = spaces.Box(
-            low=-1.0, high=2.0, shape=(self.obs_size,), dtype=np.float32
+            low=0.0, high=1.0, shape=(self.obs_size,), dtype=np.float32
         )
 
         self._current_action_mask = np.ones(self.num_actions, dtype=np.int8)

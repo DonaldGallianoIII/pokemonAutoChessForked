@@ -107,6 +107,18 @@ export const TRAINING_AUTO_PLACE = false
 // Bench penalty: applied per bench unit when board has open slots at turn end
 export const REWARD_BENCH_PENALTY = -0.01
 
+// Move fidget penalty: applied per move after MOVE_FIDGET_GRACE free moves in a row
+export const MOVE_FIDGET_GRACE = 2
+export const REWARD_MOVE_FIDGET = -0.03
+
+// Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
+export const REWARD_KEEP_UNIQUE = 0.007
+export const REWARD_KEEP_LEGENDARY = 0.007
+
+// Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
+export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
+export const REWARD_BUY_EVOLUTION = 0.20     // buying 3rd copy (triggers evolution)
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8

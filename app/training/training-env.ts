@@ -68,13 +68,19 @@ import {
   GRID_HEIGHT,
   GRID_WIDTH,
   MAX_PROPOSITIONS,
+  MOVE_FIDGET_GRACE,
   OBS_HELD_ITEMS,
   OBS_OPPONENT_COUNT,
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
   REWARD_BENCH_PENALTY,
+  REWARD_BUY_DUPLICATE,
+  REWARD_BUY_EVOLUTION,
+  REWARD_MOVE_FIDGET,
   REWARD_HP_SCALE,
+  REWARD_KEEP_LEGENDARY,
+  REWARD_KEEP_UNIQUE,
   REWARD_INTEREST_BONUS,
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
@@ -140,6 +146,7 @@ export class TrainingEnv {
   room!: HeadlessRoom
   agentId!: string
   actionsThisTurn = 0
+  consecutiveMoves = 0
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
   prevActiveSynergyCount = 0
@@ -276,6 +283,7 @@ export class TrainingEnv {
       (StageDuration[this.state.stageLevel] ?? StageDuration.DEFAULT) * 1000
 
     this.actionsThisTurn = 0
+    this.consecutiveMoves = 0
     this.totalSteps = 0
     this.lastBattleResult = null
     this.prevActiveSynergyCount = 0
@@ -318,9 +326,53 @@ export class TrainingEnv {
     }
 
     if (this.state.phase === GamePhaseState.PICK) {
+      // Snapshot shop name + existing copy count BEFORE buy (evolution merges copies)
+      const isBuy = action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5
+      let preBuyCopies = 0
+      if (isBuy) {
+        const shopIdx = action - TrainingAction.BUY_0
+        const shopName = agent.shop[shopIdx]
+        if (shopName && shopName !== Pkm.DEFAULT) {
+          const targetIndex = getPokemonData(shopName)?.index
+          if (targetIndex) {
+            preBuyCopies = values(agent.board).filter(
+              (p) => p.index === targetIndex
+            ).length
+          }
+        }
+      }
+
       // Execute the agent's action
       const actionExecuted = this.executeAction(action, agent)
       this.actionsThisTurn++
+
+      // Reward for buying duplicates (encourages building toward evolutions)
+      // Check pre-buy count: 1 existing = 2nd copy, 2 existing = 3rd copy (evolution!)
+      if (isBuy && actionExecuted && preBuyCopies >= 2) {
+        reward += REWARD_BUY_EVOLUTION
+      } else if (isBuy && actionExecuted && preBuyCopies === 1) {
+        reward += REWARD_BUY_DUPLICATE
+      }
+
+      // Move fidget penalty: 2 free moves, then -0.03 per consecutive move
+      const isMove = action >= TrainingAction.MOVE_0 && action <= TrainingAction.MOVE_0 + 31
+      if (isMove) {
+        this.consecutiveMoves++
+        if (this.consecutiveMoves > MOVE_FIDGET_GRACE) {
+          reward += REWARD_MOVE_FIDGET
+        }
+      } else {
+        this.consecutiveMoves = 0
+      }
+
+      // Per-step bonus for keeping unique/legendary units on board
+      agent.board.forEach((pokemon) => {
+        if (pokemon.positionY > 0) {
+          const rarity = getPokemonData(pokemon.name).rarity
+          if (rarity === Rarity.UNIQUE) reward += REWARD_KEEP_UNIQUE
+          else if (rarity === Rarity.LEGENDARY) reward += REWARD_KEEP_LEGENDARY
+        }
+      })
 
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
@@ -334,6 +386,7 @@ export class TrainingEnv {
           this.state.botManager.updateBots()
           this.state.shop.assignShop(agent, false, this.state)
           this.actionsThisTurn = 0
+          this.consecutiveMoves = 0
         }
         // If at a later stage with propositions (uniques, additionals), just continue the turn
         // The propositions have been cleared so normal PICK actions resume
@@ -360,6 +413,9 @@ export class TrainingEnv {
         if (TRAINING_AUTO_PLACE) {
           this.autoPlaceTeam(agent)
         }
+
+        // Auto-equip held items onto board units before combat
+        this.autoEquipItems(agent)
 
         // 7.1: Bench penalty — penalize units left on bench when board has open slots
         if (!TRAINING_AUTO_PLACE) {
@@ -400,6 +456,7 @@ export class TrainingEnv {
         // Advance to next PICK phase
         this.advanceToNextPickPhase()
         this.actionsThisTurn = 0
+        this.consecutiveMoves = 0
       }
     }
 
@@ -511,6 +568,7 @@ export class TrainingEnv {
         const selectedItem = player.itemsProposition[selectedIndex]
         if (selectedItem != null) {
           player.items.push(selectedItem)
+          this.autoEquipItems(player)
         }
         player.itemsProposition.clear()
       }
@@ -558,6 +616,7 @@ export class TrainingEnv {
     if (item == null) return false
 
     player.items.push(item)
+    this.autoEquipItems(player)
     player.itemsProposition.clear()
     this.invalidatePlayerCaches(player.id)
     return true
@@ -610,6 +669,7 @@ export class TrainingEnv {
     targetPokemon.items.forEach((it: Item) => {
       player.items.push(it)
     })
+    this.autoEquipItems(player)
 
     player.updateSynergies()
     player.boardSize = this.room.getTeamSize(player.board)
@@ -728,8 +788,59 @@ export class TrainingEnv {
     player.items.splice(j, 1)
     player.items.splice(i, 1)
     player.items.push(result)
+    this.autoEquipItems(player)
     this.invalidatePlayerCaches(player.id)
     return true
+  }
+
+  /**
+   * Auto-equip all held items onto board units.
+   * Prioritizes units on the board (y>=1) over bench (y=0),
+   * and within each group, units with fewer items first.
+   */
+  private autoEquipItems(player: Player): void {
+    if (player.items.length === 0) return
+
+    // Get all units that can hold items, sorted: board first, then by fewest items
+    const units = values(player.board)
+      .filter((p) => p.canHoldItems && p.items.size < 3)
+      .sort((a, b) => {
+        // Board units (y>=1) before bench units (y=0)
+        const aOnBoard = a.positionY >= 1 ? 0 : 1
+        const bOnBoard = b.positionY >= 1 ? 0 : 1
+        if (aOnBoard !== bOnBoard) return aOnBoard - bOnBoard
+        // Fewer items first (spread items across units)
+        return a.items.size - b.items.size
+      })
+
+    if (units.length === 0) return
+
+    // Take all items out of player inventory, try to equip each
+    const itemsToEquip = Array.from(player.items.values()) as Item[]
+    const remaining: Item[] = []
+
+    for (const item of itemsToEquip) {
+      // Re-sort to account for items we just added
+      units.sort((a, b) => {
+        const aOnBoard = a.positionY >= 1 ? 0 : 1
+        const bOnBoard = b.positionY >= 1 ? 0 : 1
+        if (aOnBoard !== bOnBoard) return aOnBoard - bOnBoard
+        return a.items.size - b.items.size
+      })
+
+      // Find first unit with room
+      const target = units.find((u) => u.items.size < 3)
+      if (!target) {
+        remaining.push(item)
+        continue
+      }
+
+      target.addItem(item, player)
+    }
+
+    // Replace player inventory with only unequipped items
+    player.items.clear()
+    remaining.forEach((item) => player.items.push(item))
   }
 
   private autoPlaceTeam(player: Player): void {
@@ -1063,6 +1174,7 @@ export class TrainingEnv {
           // Auto-give direct rewards (getRewards)
           const directRewards = pveStage.getRewards?.(player) ?? []
           directRewards.forEach((item) => player.items.push(item))
+          if (directRewards.length > 0) this.autoEquipItems(player)
 
           // Set reward propositions for agent to pick (getRewardsPropositions)
           const rewardPropositions = pveStage.getRewardsPropositions?.(player) ?? []
@@ -1071,6 +1183,7 @@ export class TrainingEnv {
           } else if (rewardPropositions.length > 0 && player.isBot) {
             // Bots auto-pick a random reward proposition
             player.items.push(pickRandomIn(rewardPropositions))
+            this.autoEquipItems(player)
           }
         })
       }
@@ -1274,6 +1387,7 @@ export class TrainingEnv {
           const selectedItem = player.itemsProposition[selectedIndex]
           if (selectedItem != null) {
             player.items.push(selectedItem)
+            this.autoEquipItems(player)
           }
         }
 
@@ -1284,6 +1398,7 @@ export class TrainingEnv {
         // Item-only propositions (PVE rewards, etc.)
         const pick = pickRandomIn(values(player.itemsProposition))
         player.items.push(pick)
+        this.autoEquipItems(player)
         player.itemsProposition.clear()
       }
     })
@@ -1310,6 +1425,7 @@ export class TrainingEnv {
       const items = values(agent.itemsProposition)
       const pick = pickRandomIn(items)
       agent.items.push(pick)
+      this.autoEquipItems(agent)
       agent.itemsProposition.clear()
     }
   }
@@ -1563,20 +1679,22 @@ export class TrainingEnv {
     }
 
     // ── Player stats (14) ──────────────────────────────────────────────
-    obs.push(agent.life / 100)
-    obs.push(agent.money / 100)
-    obs.push(agent.experienceManager.level / 9)
-    obs.push(agent.streak / 10)
-    obs.push(agent.interest / 5)
+    // All values clamped to [0, 1] to prevent silent clipping in SB3
+    const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
+    obs.push(clamp01(agent.life / 100))
+    obs.push(clamp01(agent.money / 300))              // was /100, gold can reach 200+
+    obs.push(clamp01(agent.experienceManager.level / 9))
+    obs.push(clamp01((agent.streak + 20) / 40))       // was /10, streaks range -20..+20 → normalize to 0..1
+    obs.push(clamp01(agent.interest / 5))
     obs.push(agent.alive ? 1 : 0)
-    obs.push(agent.rank / 8)
-    obs.push(agent.boardSize / 9)
-    obs.push((agent.experienceManager.expNeeded ?? 0) / 32)
-    obs.push((agent.shopFreeRolls ?? 0) / 3)
-    obs.push((agent.rerollCount ?? 0) / 20)
+    obs.push(clamp01(agent.rank / 8))
+    obs.push(clamp01(agent.boardSize / 9))
+    obs.push(clamp01((agent.experienceManager.expNeeded ?? 0) / 32))
+    obs.push(clamp01((agent.shopFreeRolls ?? 0) / 3))
+    obs.push(clamp01((agent.rerollCount ?? 0) / 50))  // was /20, can exceed 20 late game
     obs.push(agent.shopLocked ? 1 : 0)
-    obs.push((agent.totalMoneyEarned ?? 0) / 200)
-    obs.push((agent.totalPlayerDamageDealt ?? 0) / 100)
+    obs.push(clamp01((agent.totalMoneyEarned ?? 0) / 500))   // was /200, can exceed 200
+    obs.push(clamp01((agent.totalPlayerDamageDealt ?? 0) / 300))  // was /100, can exceed 100
 
     // ── Shop (6 slots × 9 features = 54) ───────────────────────────────
     for (let i = 0; i < 6; i++) {
@@ -2152,6 +2270,9 @@ export class TrainingEnv {
       }))
     }
 
+    // Track duplicate buy rewards per player
+    const dupBuyRewards = new Map<string, number>()
+
     // ── Phase 1: Process each player's action ──────────────────────────
 
     for (let i = 0; i < this.playerIds.length; i++) {
@@ -2205,8 +2326,34 @@ export class TrainingEnv {
         // but fall through to normal processing as safety
       }
 
+      // Snapshot existing copy count BEFORE buy (evolution merges copies)
+      const isBuyBatch = action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5
+      let preBuyCopiesBatch = 0
+      if (isBuyBatch) {
+        const shopIdx = action - TrainingAction.BUY_0
+        const shopName = player.shop[shopIdx]
+        if (shopName && shopName !== Pkm.DEFAULT) {
+          const targetIndex = getPokemonData(shopName)?.index
+          if (targetIndex) {
+            preBuyCopiesBatch = values(player.board).filter(
+              (p) => p.index === targetIndex
+            ).length
+          }
+        }
+      }
+
       // Execute normal PICK phase action
-      this.executeAction(action, player)
+      const actionExecutedBatch = this.executeAction(action, player)
+
+      // Reward for buying duplicates (encourages building toward evolutions)
+      if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch >= 2) {
+        const prev = dupBuyRewards.get(playerId) ?? 0
+        dupBuyRewards.set(playerId, prev + REWARD_BUY_EVOLUTION)
+      } else if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch === 1) {
+        const prev = dupBuyRewards.get(playerId) ?? 0
+        dupBuyRewards.set(playerId, prev + REWARD_BUY_DUPLICATE)
+      }
+
       const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
       this.actionsPerPlayer.set(playerId, actCount)
 
@@ -2226,6 +2373,9 @@ export class TrainingEnv {
         if (TRAINING_AUTO_PLACE) {
           this.autoPlaceTeam(player)
         }
+
+        // Auto-equip held items onto board units before combat
+        this.autoEquipItems(player)
       }
     }
 
@@ -2306,6 +2456,9 @@ export class TrainingEnv {
 
       // 7.1: Add bench penalty (computed before fight)
       reward += benchPenalties.get(id) ?? 0
+
+      // Add duplicate buy reward
+      reward += dupBuyRewards.get(id) ?? 0
 
       if (fightTriggered) {
         // Issue #2: ALL players get their combat reward
