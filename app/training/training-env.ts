@@ -1361,8 +1361,13 @@ export class TrainingEnv {
       ) {
         if (!player.shopLocked) {
           this.state.shop.assignShop(player, false, this.state)
-          player.shopLocked = false
         }
+        // Always clear the lock between rounds. In the real game, shop lock
+        // is a one-round intent: "keep this shop for now." Next round the
+        // shop refreshes normally unless the player re-locks it.
+        // Bug: REMOVE_SHOP sets shopLocked=true, and without this reset the
+        // shop stayed frozen forever (16 stages with the same stale shop).
+        player.shopLocked = false
       }
     })
 
