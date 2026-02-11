@@ -126,6 +126,12 @@ export interface StepResult {
     bench: { name: string; x: number; stars: number; items: string[] }[]
     synergies: { name: string; count: number; threshold: number }[]
     items: string[]
+    opponent: {
+      name: string
+      odLife: number
+      level: number
+      board: { name: string; x: number; y: number; stars: number; items: string[] }[]
+    } | null
   }
 }
 
@@ -2002,6 +2008,34 @@ export class TrainingEnv {
 
     const level = agent?.experienceManager?.level ?? 1
 
+    // Opponent info (populated after fights when opponentId is set)
+    let opponentInfo: StepResult["info"]["opponent"] = null
+    if (agent?.opponentId && agent.opponentId !== "pve") {
+      const opp = this.state.players.get(agent.opponentId)
+      if (opp) {
+        const oppBoard: StepResult["info"]["board"] = []
+        opp.board.forEach((pokemon) => {
+          if (pokemon.positionY > 0) {
+            const items = Array.from(pokemon.items.values()) as string[]
+            oppBoard.push({ name: pokemon.name, x: pokemon.positionX, y: pokemon.positionY, stars: pokemon.stars, items })
+          }
+        })
+        opponentInfo = {
+          name: agent.opponentName ?? opp.name,
+          odLife: opp.life,
+          level: opp.experienceManager?.level ?? 1,
+          board: oppBoard
+        }
+      }
+    } else if (agent?.opponentId === "pve") {
+      opponentInfo = {
+        name: agent.opponentName ?? "PVE",
+        odLife: 0,
+        level: 0,
+        board: []
+      }
+    }
+
     return {
       stage: this.state.stageLevel,
       phase:
@@ -2029,7 +2063,8 @@ export class TrainingEnv {
       board: boardUnits,
       bench: benchUnits,
       synergies: activeSynergies,
-      items: heldItems
+      items: heldItems,
+      opponent: opponentInfo
     }
   }
 
