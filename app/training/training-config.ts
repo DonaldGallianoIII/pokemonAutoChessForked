@@ -111,6 +111,10 @@ export const REWARD_BENCH_PENALTY = -0.01
 export const MOVE_FIDGET_GRACE = 2
 export const REWARD_MOVE_FIDGET = -0.03
 
+// Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
+export const REWARD_KEEP_UNIQUE = 0.007
+export const REWARD_KEEP_LEGENDARY = 0.007
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8

@@ -77,6 +77,8 @@ import {
   REWARD_BENCH_PENALTY,
   REWARD_MOVE_FIDGET,
   REWARD_HP_SCALE,
+  REWARD_KEEP_LEGENDARY,
+  REWARD_KEEP_UNIQUE,
   REWARD_INTEREST_BONUS,
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
@@ -336,6 +338,15 @@ export class TrainingEnv {
       } else {
         this.consecutiveMoves = 0
       }
+
+      // Per-step bonus for keeping unique/legendary units on board
+      agent.board.forEach((pokemon) => {
+        if (pokemon.positionY > 0) {
+          const rarity = getPokemonData(pokemon.name).rarity
+          if (rarity === Rarity.UNIQUE) reward += REWARD_KEEP_UNIQUE
+          else if (rarity === Rarity.LEGENDARY) reward += REWARD_KEEP_LEGENDARY
+        }
+      })
 
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
