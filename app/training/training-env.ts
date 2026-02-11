@@ -388,6 +388,9 @@ export class TrainingEnv {
           this.autoPlaceTeam(agent)
         }
 
+        // Auto-equip held items onto board units before combat
+        this.autoEquipItems(agent)
+
         // 7.1: Bench penalty — penalize units left on bench when board has open slots
         if (!TRAINING_AUTO_PLACE) {
           const maxTeamSize = getMaxTeamSize(
@@ -539,6 +542,7 @@ export class TrainingEnv {
         const selectedItem = player.itemsProposition[selectedIndex]
         if (selectedItem != null) {
           player.items.push(selectedItem)
+          this.autoEquipItems(player)
         }
         player.itemsProposition.clear()
       }
@@ -586,6 +590,7 @@ export class TrainingEnv {
     if (item == null) return false
 
     player.items.push(item)
+    this.autoEquipItems(player)
     player.itemsProposition.clear()
     this.invalidatePlayerCaches(player.id)
     return true
@@ -638,6 +643,7 @@ export class TrainingEnv {
     targetPokemon.items.forEach((it: Item) => {
       player.items.push(it)
     })
+    this.autoEquipItems(player)
 
     player.updateSynergies()
     player.boardSize = this.room.getTeamSize(player.board)
@@ -756,8 +762,59 @@ export class TrainingEnv {
     player.items.splice(j, 1)
     player.items.splice(i, 1)
     player.items.push(result)
+    this.autoEquipItems(player)
     this.invalidatePlayerCaches(player.id)
     return true
+  }
+
+  /**
+   * Auto-equip all held items onto board units.
+   * Prioritizes units on the board (y>=1) over bench (y=0),
+   * and within each group, units with fewer items first.
+   */
+  private autoEquipItems(player: Player): void {
+    if (player.items.length === 0) return
+
+    // Get all units that can hold items, sorted: board first, then by fewest items
+    const units = values(player.board)
+      .filter((p) => p.canHoldItems && p.items.size < 3)
+      .sort((a, b) => {
+        // Board units (y>=1) before bench units (y=0)
+        const aOnBoard = a.positionY >= 1 ? 0 : 1
+        const bOnBoard = b.positionY >= 1 ? 0 : 1
+        if (aOnBoard !== bOnBoard) return aOnBoard - bOnBoard
+        // Fewer items first (spread items across units)
+        return a.items.size - b.items.size
+      })
+
+    if (units.length === 0) return
+
+    // Take all items out of player inventory, try to equip each
+    const itemsToEquip = Array.from(player.items.values()) as Item[]
+    const remaining: Item[] = []
+
+    for (const item of itemsToEquip) {
+      // Re-sort to account for items we just added
+      units.sort((a, b) => {
+        const aOnBoard = a.positionY >= 1 ? 0 : 1
+        const bOnBoard = b.positionY >= 1 ? 0 : 1
+        if (aOnBoard !== bOnBoard) return aOnBoard - bOnBoard
+        return a.items.size - b.items.size
+      })
+
+      // Find first unit with room
+      const target = units.find((u) => u.items.size < 3)
+      if (!target) {
+        remaining.push(item)
+        continue
+      }
+
+      target.addItem(item, player)
+    }
+
+    // Replace player inventory with only unequipped items
+    player.items.clear()
+    remaining.forEach((item) => player.items.push(item))
   }
 
   private autoPlaceTeam(player: Player): void {
@@ -1091,6 +1148,7 @@ export class TrainingEnv {
           // Auto-give direct rewards (getRewards)
           const directRewards = pveStage.getRewards?.(player) ?? []
           directRewards.forEach((item) => player.items.push(item))
+          if (directRewards.length > 0) this.autoEquipItems(player)
 
           // Set reward propositions for agent to pick (getRewardsPropositions)
           const rewardPropositions = pveStage.getRewardsPropositions?.(player) ?? []
@@ -1099,6 +1157,7 @@ export class TrainingEnv {
           } else if (rewardPropositions.length > 0 && player.isBot) {
             // Bots auto-pick a random reward proposition
             player.items.push(pickRandomIn(rewardPropositions))
+            this.autoEquipItems(player)
           }
         })
       }
@@ -1302,6 +1361,7 @@ export class TrainingEnv {
           const selectedItem = player.itemsProposition[selectedIndex]
           if (selectedItem != null) {
             player.items.push(selectedItem)
+            this.autoEquipItems(player)
           }
         }
 
@@ -1312,6 +1372,7 @@ export class TrainingEnv {
         // Item-only propositions (PVE rewards, etc.)
         const pick = pickRandomIn(values(player.itemsProposition))
         player.items.push(pick)
+        this.autoEquipItems(player)
         player.itemsProposition.clear()
       }
     })
@@ -1338,6 +1399,7 @@ export class TrainingEnv {
       const items = values(agent.itemsProposition)
       const pick = pickRandomIn(items)
       agent.items.push(pick)
+      this.autoEquipItems(agent)
       agent.itemsProposition.clear()
     }
   }
@@ -2254,6 +2316,9 @@ export class TrainingEnv {
         if (TRAINING_AUTO_PLACE) {
           this.autoPlaceTeam(player)
         }
+
+        // Auto-equip held items onto board units before combat
+        this.autoEquipItems(player)
       }
     }
 
