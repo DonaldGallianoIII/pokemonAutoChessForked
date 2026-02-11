@@ -76,10 +76,16 @@ import {
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
   GOLD_EXCESS_THRESHOLD,
+  GOLD_LATEGAME_STAGE,
+  GOLD_LATEGAME_TIER1_THRESHOLD,
+  GOLD_LATEGAME_TIER2_THRESHOLD,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
   REWARD_BUY_EVOLUTION,
   REWARD_GOLD_EXCESS_PENALTY,
+  REWARD_GOLD_LATEGAME_TIER1,
+  REWARD_GOLD_LATEGAME_TIER2,
+  REWARD_GOLD_LATEGAME_TIER3,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
@@ -1224,14 +1230,33 @@ export class TrainingEnv {
       }
     })
 
-    // 6.5: Gold hoarding penalty — discourage holding gold beyond the interest cap + level-up buffer.
-    // Interest maxes out at 50g held; 70g threshold gives room to save for a level-up.
-    // Applied at end of stage (before income is added) so it captures the decision to hoard.
+    // 6.5: Gold hoarding penalty — discourage holding gold beyond interest cap.
+    // Before stage 21: flat -0.04 per gold above 70.
+    // After stage 21 (tiered): >50g -0.01, >60g -0.04, >70g -0.07 per gold in each bracket.
+    // Applied before income so it reflects the agent's spending decisions.
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
-      const excess = player.money - GOLD_EXCESS_THRESHOLD
-      if (excess > 0) {
-        rewards.set(id, (rewards.get(id) ?? 0) + excess * REWARD_GOLD_EXCESS_PENALTY)
+      const gold = player.money
+      let penalty = 0
+      if (this.state.stageLevel >= GOLD_LATEGAME_STAGE) {
+        // Late game: tiered brackets (each tier only penalizes gold within its range)
+        if (gold > GOLD_EXCESS_THRESHOLD) {
+          penalty += (gold - GOLD_EXCESS_THRESHOLD) * REWARD_GOLD_LATEGAME_TIER3
+        }
+        if (gold > GOLD_LATEGAME_TIER2_THRESHOLD) {
+          penalty += (Math.min(gold, GOLD_EXCESS_THRESHOLD) - GOLD_LATEGAME_TIER2_THRESHOLD) * REWARD_GOLD_LATEGAME_TIER2
+        }
+        if (gold > GOLD_LATEGAME_TIER1_THRESHOLD) {
+          penalty += (Math.min(gold, GOLD_LATEGAME_TIER2_THRESHOLD) - GOLD_LATEGAME_TIER1_THRESHOLD) * REWARD_GOLD_LATEGAME_TIER1
+        }
+      } else {
+        // Early game: flat penalty above 70
+        if (gold > GOLD_EXCESS_THRESHOLD) {
+          penalty += (gold - GOLD_EXCESS_THRESHOLD) * REWARD_GOLD_EXCESS_PENALTY
+        }
+      }
+      if (penalty < 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + penalty)
       }
     })
 

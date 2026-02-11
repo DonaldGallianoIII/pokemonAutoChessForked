@@ -134,9 +134,19 @@ export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
 export const REWARD_BUY_EVOLUTION = 0.20     // buying 3rd copy (triggers evolution)
 
 // Gold hoarding penalty: applied per excess gold above threshold at end of each stage.
-// Interest caps at 50g held, plus 20g padding for saving toward a level-up = 70g threshold.
+// Interest caps at 50g held; early game allows saving for levels, late game punishes harder.
+//
+// Before stage 21:  >70g → -0.04/gold
+// After stage 21 (tiered):
+//   >50g → -0.01/gold,  >60g → -0.04/gold,  >70g → -0.07/gold
 export const GOLD_EXCESS_THRESHOLD = 70
-export const REWARD_GOLD_EXCESS_PENALTY = -0.02 // per gold above threshold
+export const REWARD_GOLD_EXCESS_PENALTY = -0.04       // per gold above 70 (early game)
+export const GOLD_LATEGAME_STAGE = 21                  // stage at which stricter tiers kick in
+export const GOLD_LATEGAME_TIER1_THRESHOLD = 50        // >50g
+export const REWARD_GOLD_LATEGAME_TIER1 = -0.01        // per gold above 50
+export const GOLD_LATEGAME_TIER2_THRESHOLD = 60        // >60g
+export const REWARD_GOLD_LATEGAME_TIER2 = -0.04        // per gold above 60
+export const REWARD_GOLD_LATEGAME_TIER3 = -0.07        // per gold above 70
 
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
