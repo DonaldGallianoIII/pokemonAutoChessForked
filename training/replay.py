@@ -249,6 +249,13 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     losses = 0
     draws = 0
 
+    # Track observation bounds across the entire game
+    obs_global_min = obs.min()
+    obs_global_max = obs.max()
+    obs_clipped_count = 0  # steps where obs hits bounds
+
+    print(f"  [OBS] reset: min={obs.min():.4f}  max={obs.max():.4f}  shape={obs.shape}")
+
     print(
         f"{'Stage':>5} | {'Turn':>4} | {'Lv':>2} | {'Gold':>5} | "
         f"{'Board':>9} | {'HP':>5} | {'Action':<24} | Detail"
@@ -285,6 +292,19 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
         total_steps += 1
         done = terminated or truncated
 
+        # Track obs bounds
+        step_min, step_max = obs.min(), obs.max()
+        obs_global_min = min(obs_global_min, step_min)
+        obs_global_max = max(obs_global_max, step_max)
+        if step_min < -1.0 or step_max > 2.0:
+            obs_clipped_count += 1
+            # Find which indices are out of bounds
+            oob_low = np.where(obs < -1.0)[0]
+            oob_high = np.where(obs > 2.0)[0]
+            if len(oob_low) > 0 or len(oob_high) > 0:
+                print(f"  [OBS WARNING] min={step_min:.4f} max={step_max:.4f}  "
+                      f"low_idx={oob_low.tolist()}  high_idx={oob_high.tolist()}")
+
         # After END_TURN: print board state + fight summary
         if action == 9:  # END_TURN
             new_life = info.get("life", life)
@@ -312,6 +332,14 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
                 f"| Rank: {new_rank} ==="
             )
 
+            # Obs snapshot: show raw values for key player stats
+            # Indices: 0=life/100, 1=money/100, 2=level/9, 3=streak/10,
+            #          4=interest/5, 7=boardSize/9, 12=totalMoney/200, 13=totalDmg/100
+            print(f"  [OBS] life={obs[0]:.3f} money={obs[1]:.3f} level={obs[2]:.3f} "
+                  f"streak={obs[3]:.3f} interest={obs[4]:.3f} boardSz={obs[7]:.3f} "
+                  f"totalMoney={obs[12]:.3f} totalDmg={obs[13]:.3f} "
+                  f"| raw gold~{obs[1]*100:.0f}g | min={obs.min():.3f} max={obs.max():.3f}")
+
             # Print opponent team, then our board state for the upcoming turn
             _print_opponent(info)
             _print_board_state(info)
@@ -336,6 +364,17 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     print(f"  Total Steps:    {total_steps}")
     print(f"  Total Reward:   {total_reward:+.3f}")
     print(f"  Fights:         {fights}  (W:{wins} / L:{losses} / D:{draws})")
+
+    # Observation bounds report
+    print()
+    print("  --- Observation Bounds Report ---")
+    print(f"  Global min:     {obs_global_min:.4f}  (env low=-1.0)")
+    print(f"  Global max:     {obs_global_max:.4f}  (env high=2.0)")
+    print(f"  Steps clipped:  {obs_clipped_count} / {total_steps}")
+    if obs_global_max > 1.05 or obs_global_min < -0.05:
+        print(f"  ** Values outside [0,1] range detected! Check normalization **")
+    if obs_global_max > 2.0 or obs_global_min < -1.0:
+        print(f"  ** VALUES EXCEED ENV BOUNDS — SB3 IS SILENTLY CLIPPING! **")
     if fights > 0:
         print(f"  Win Rate:       {wins / fights:.1%}")
 
