@@ -79,6 +79,7 @@ import {
   GOLD_LATEGAME_STAGE,
   GOLD_LATEGAME_TIER1_THRESHOLD,
   GOLD_LATEGAME_TIER2_THRESHOLD,
+  GOLD_MIN_TARGETS,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
   REWARD_BUY_EVOLUTION,
@@ -86,6 +87,7 @@ import {
   REWARD_GOLD_LATEGAME_TIER1,
   REWARD_GOLD_LATEGAME_TIER2,
   REWARD_GOLD_LATEGAME_TIER3,
+  REWARD_GOLD_LOW_PENALTY,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
@@ -1257,6 +1259,21 @@ export class TrainingEnv {
       }
       if (penalty < 0) {
         rewards.set(id, (rewards.get(id) ?? 0) + penalty)
+      }
+    })
+
+    // 6.6: Low-gold penalty — teach the agent to save toward interest thresholds.
+    // The minimum gold target ramps up with stage progression (no penalty before stage 5).
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const target = GOLD_MIN_TARGETS.find(
+        ([stage]) => this.state.stageLevel >= stage
+      )
+      if (target) {
+        const deficit = target[1] - player.money
+        if (deficit > 0) {
+          rewards.set(id, (rewards.get(id) ?? 0) + deficit * REWARD_GOLD_LOW_PENALTY)
+        }
       }
     })
 

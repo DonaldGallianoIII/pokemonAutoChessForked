@@ -148,6 +148,20 @@ export const GOLD_LATEGAME_TIER2_THRESHOLD = 60        // >60g
 export const REWARD_GOLD_LATEGAME_TIER2 = -0.04        // per gold above 60
 export const REWARD_GOLD_LATEGAME_TIER3 = -0.07        // per gold above 70
 
+// Low-gold penalty: teaches the agent to save toward interest thresholds.
+// Before stage 5: no penalty. Then the minimum gold target ramps up:
+//   stage 5+ → 10g,  stage 8+ → 20g,  stage 12+ → 30g,
+//   stage 15+ → 40g, stage 19+ → 50g
+// Penalty is per gold below the target for the current stage.
+export const GOLD_MIN_TARGETS: [number, number][] = [
+  [19, 50],  // stage 19+: save to 50g (full interest)
+  [15, 40],  // stage 15+: save to 40g
+  [12, 30],  // stage 12+: save to 30g
+  [8, 20],   // stage  8+: save to 20g
+  [5, 10],   // stage  5+: save to 10g
+]
+export const REWARD_GOLD_LOW_PENALTY = -0.01           // per gold below target
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8
