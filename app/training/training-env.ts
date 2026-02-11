@@ -1679,20 +1679,22 @@ export class TrainingEnv {
     }
 
     // ── Player stats (14) ──────────────────────────────────────────────
-    obs.push(agent.life / 100)
-    obs.push(agent.money / 100)
-    obs.push(agent.experienceManager.level / 9)
-    obs.push(agent.streak / 10)
-    obs.push(agent.interest / 5)
+    // All values clamped to [0, 1] to prevent silent clipping in SB3
+    const clamp01 = (v: number) => Math.min(1, Math.max(0, v))
+    obs.push(clamp01(agent.life / 100))
+    obs.push(clamp01(agent.money / 300))              // was /100, gold can reach 200+
+    obs.push(clamp01(agent.experienceManager.level / 9))
+    obs.push(clamp01((agent.streak + 20) / 40))       // was /10, streaks range -20..+20 → normalize to 0..1
+    obs.push(clamp01(agent.interest / 5))
     obs.push(agent.alive ? 1 : 0)
-    obs.push(agent.rank / 8)
-    obs.push(agent.boardSize / 9)
-    obs.push((agent.experienceManager.expNeeded ?? 0) / 32)
-    obs.push((agent.shopFreeRolls ?? 0) / 3)
-    obs.push((agent.rerollCount ?? 0) / 20)
+    obs.push(clamp01(agent.rank / 8))
+    obs.push(clamp01(agent.boardSize / 9))
+    obs.push(clamp01((agent.experienceManager.expNeeded ?? 0) / 32))
+    obs.push(clamp01((agent.shopFreeRolls ?? 0) / 3))
+    obs.push(clamp01((agent.rerollCount ?? 0) / 50))  // was /20, can exceed 20 late game
     obs.push(agent.shopLocked ? 1 : 0)
-    obs.push((agent.totalMoneyEarned ?? 0) / 200)
-    obs.push((agent.totalPlayerDamageDealt ?? 0) / 100)
+    obs.push(clamp01((agent.totalMoneyEarned ?? 0) / 500))   // was /200, can exceed 200
+    obs.push(clamp01((agent.totalPlayerDamageDealt ?? 0) / 300))  // was /100, can exceed 100
 
     // ── Shop (6 slots × 9 features = 54) ───────────────────────────────
     for (let i = 0; i < 6; i++) {

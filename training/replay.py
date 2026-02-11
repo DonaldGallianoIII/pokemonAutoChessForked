@@ -333,12 +333,12 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
             )
 
             # Obs snapshot: show raw values for key player stats
-            # Indices: 0=life/100, 1=money/100, 2=level/9, 3=streak/10,
-            #          4=interest/5, 7=boardSize/9, 12=totalMoney/200, 13=totalDmg/100
+            # Indices: 0=life/100, 1=money/300, 2=level/9, 3=(streak+20)/40,
+            #          4=interest/5, 7=boardSize/9, 12=totalMoney/500, 13=totalDmg/300
             print(f"  [OBS] life={obs[0]:.3f} money={obs[1]:.3f} level={obs[2]:.3f} "
                   f"streak={obs[3]:.3f} interest={obs[4]:.3f} boardSz={obs[7]:.3f} "
                   f"totalMoney={obs[12]:.3f} totalDmg={obs[13]:.3f} "
-                  f"| raw gold~{obs[1]*100:.0f}g | min={obs.min():.3f} max={obs.max():.3f}")
+                  f"| raw gold~{obs[1]*300:.0f}g | min={obs.min():.3f} max={obs.max():.3f}")
 
             # Print opponent team, then our board state for the upcoming turn
             _print_opponent(info)
