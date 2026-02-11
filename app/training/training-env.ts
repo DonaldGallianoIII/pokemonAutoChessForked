@@ -80,6 +80,7 @@ import {
   REWARD_BUY_EVOLUTION,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
+  REWARD_REROLL_WITH_OPEN_SLOTS,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
@@ -393,6 +394,17 @@ export class TrainingEnv {
       // Level-up reward
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
         reward += REWARD_LEVEL_UP
+      }
+
+      // Reroll reward: incentivize refreshing shop when board has open slots
+      if (action === TrainingAction.REFRESH && actionExecuted) {
+        const maxTeamSize = getMaxTeamSize(
+          agent.experienceManager.level,
+          this.state.specialGameRule
+        )
+        if (agent.boardSize < maxTeamSize) {
+          reward += REWARD_REROLL_WITH_OPEN_SLOTS
+        }
       }
 
       // Per-step bonus for keeping unique/legendary units on board
