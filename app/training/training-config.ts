@@ -115,6 +115,9 @@ export const REWARD_MOVE_FIDGET = -0.03
 export const REWARD_KEEP_UNIQUE = 0.007
 export const REWARD_KEEP_LEGENDARY = 0.007
 
+// Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
+export const REWARD_BUY_DUPLICATE = 0.08
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8
