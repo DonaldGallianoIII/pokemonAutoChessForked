@@ -22,6 +22,31 @@ import time
 
 import requests
 
+_IS_WINDOWS = sys.platform == "win32"
+
+
+def _kill_proc_tree(proc):
+    """Kill a subprocess and all its children, cross-platform."""
+    if _IS_WINDOWS:
+        # taskkill /T kills the entire process tree, /F forces it
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+
 
 def launch_servers(
     num_envs: int = 16,
@@ -46,18 +71,7 @@ def launch_servers(
     def cleanup():
         for proc, port in servers:
             if proc.poll() is None:
-                # Kill the entire process group to avoid orphan Node children
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        proc.kill()
+                _kill_proc_tree(proc)
         if servers:
             print(f"All {len(servers)} training servers shut down.")
 
@@ -66,6 +80,13 @@ def launch_servers(
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 
     # --- Spawn all processes ---
+    # Platform-specific kwargs for process group isolation
+    popen_kwargs: dict = {}
+    if _IS_WINDOWS:
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["preexec_fn"] = os.setsid
+
     for i in range(num_envs):
         port = base_port + i
         env = os.environ.copy()
@@ -79,7 +100,7 @@ def launch_servers(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=project_root,
-            preexec_fn=os.setsid,
+            **popen_kwargs,
         )
         servers.append((proc, port))
         print(f"Spawned server process for port {port} (pid {proc.pid})")
@@ -113,10 +134,11 @@ def launch_servers(
         if not healthy:
             stderr_output = ""
             if proc.stderr:
-                # Non-blocking read of whatever is available
-                import select
-                if select.select([proc.stderr], [], [], 0)[0]:
-                    stderr_output = proc.stderr.read(4096).decode(errors="replace")
+                if not _IS_WINDOWS:
+                    import select
+                    if select.select([proc.stderr], [], [], 0)[0]:
+                        stderr_output = proc.stderr.read(4096).decode(errors="replace")
+                # On Windows, skip non-blocking read (select doesn't work on pipes)
             cleanup()
             raise TimeoutError(
                 f"Server on port {port} did not become healthy within "
