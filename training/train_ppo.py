@@ -192,12 +192,14 @@ def train(
     log_dir: str = "training/logs",
     resume_from: Optional[str] = None,
     phase: str = "A",
+    num_envs: int = 1,
+    base_port: int = 9100,
 ):
     """
     Train a MaskablePPO agent on Pokemon Auto Chess.
 
     Args:
-        server_url: URL of the TypeScript training server
+        server_url: URL of the TypeScript training server (used when num_envs=1)
         total_timesteps: Total training timesteps
         learning_rate: PPO learning rate
         n_steps: Steps per rollout buffer collection
@@ -213,6 +215,8 @@ def train(
         phase: Training phase label for checkpoint naming.
                "A" = dummy bots (curriculum), "B" = self-play.
                When transitioning A→B, pass --resume with Phase A checkpoint.
+        num_envs: Number of parallel environments (1 = single server, >1 = SubprocVecEnv)
+        base_port: Base port for training servers (used when num_envs > 1)
     """
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -220,14 +224,41 @@ def train(
     # Checkpoint prefix encodes phase + action space for rollback clarity.
     checkpoint_prefix = f"phase{phase}_92act"
 
-    # Wait for server
-    wait_for_server(server_url)
+    if num_envs > 1:
+        from stable_baselines3.common.vec_env import SubprocVecEnv
 
-    # Run benchmark
-    benchmark_env(server_url)
+        print(f"Using {num_envs} parallel environments on ports {base_port}-{base_port + num_envs - 1}")
 
-    # Create environment
-    env = make_env(server_url)
+        # Wait for all servers to be healthy
+        for i in range(num_envs):
+            port = base_port + i
+            wait_for_server(f"http://localhost:{port}")
+
+        # Benchmark on the first server only
+        benchmark_env(f"http://localhost:{base_port}")
+
+        # SubprocVecEnv requires factory functions (closures), not env instances
+        def make_parallel_env(port):
+            def _init():
+                env = PokemonAutoChessEnv(server_url=f"http://localhost:{port}")
+                env = Monitor(env)
+                return env
+            return _init
+
+        env = SubprocVecEnv(
+            [make_parallel_env(base_port + i) for i in range(num_envs)]
+        )
+    else:
+        print(f"Using single environment on port {base_port}")
+
+        # Wait for server
+        wait_for_server(server_url)
+
+        # Run benchmark
+        benchmark_env(server_url)
+
+        # Create environment
+        env = make_env(server_url)
 
     # Create or load model
     if resume_from and os.path.exists(resume_from):
@@ -342,6 +373,8 @@ if __name__ == "__main__":
         help="Training phase: A=dummy bots (curriculum), B=self-play. "
              "Affects checkpoint naming. When going A→B, use --resume with Phase A checkpoint."
     )
+    parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
+    parser.add_argument("--base-port", type=int, default=9100, help="Base port for training servers")
     parser.add_argument("--evaluate", default=None, help="Evaluate model at path instead of training")
     parser.add_argument("--eval-games", type=int, default=20, help="Number of evaluation games")
     parser.add_argument("--benchmark", action="store_true", help="Just run benchmark")
@@ -366,4 +399,6 @@ if __name__ == "__main__":
             log_dir=args.log_dir,
             resume_from=args.resume,
             phase=args.phase,
+            num_envs=args.num_envs,
+            base_port=args.base_port,
         )
