@@ -117,11 +117,13 @@ export const REWARD_MOVE_FIDGET = -0.08  // was -0.03, increased to punish oscil
 // Sell penalty: penalize selling evolved (2-3 star) units
 export const REWARD_SELL_EVOLVED = -0.15
 
-// Level-up reward: small incentive to invest gold in levels
+// Level-up reward: only when board is reasonably filled (boardSize >= maxTeamSize - 2)
+// Prevents the "level to 9 with 3 units" degenerate strategy
 export const REWARD_LEVEL_UP = 0.10
 
-// Reroll reward: small incentive to refresh shop when board isn't full
-export const REWARD_REROLL_WITH_OPEN_SLOTS = 0.04
+// Reroll reward: unconditional small incentive to refresh shop
+// Teaches the agent that rerolling exists and is useful (find duplicates, upgrades, etc.)
+export const REWARD_REROLL = 0.03
 
 // Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
 export const REWARD_KEEP_UNIQUE = 0.007
