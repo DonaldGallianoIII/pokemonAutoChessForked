@@ -76,6 +76,7 @@ import {
   OBS_PROPOSITION_SLOTS,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
+  REWARD_BUY_EVOLUTION,
   REWARD_MOVE_FIDGET,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
@@ -325,15 +326,19 @@ export class TrainingEnv {
     }
 
     if (this.state.phase === GamePhaseState.PICK) {
-      // Snapshot shop name before buy (executeAction clears the shop slot)
+      // Snapshot shop name + existing copy count BEFORE buy (evolution merges copies)
       const isBuy = action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5
-      let buyTargetIndex: string | undefined
+      let preBuyCopies = 0
       if (isBuy) {
         const shopIdx = action - TrainingAction.BUY_0
         const shopName = agent.shop[shopIdx]
         if (shopName && shopName !== Pkm.DEFAULT) {
-          const pkmData = getPokemonData(shopName)
-          buyTargetIndex = pkmData?.index
+          const targetIndex = getPokemonData(shopName)?.index
+          if (targetIndex) {
+            preBuyCopies = values(agent.board).filter(
+              (p) => p.index === targetIndex
+            ).length
+          }
         }
       }
 
@@ -341,15 +346,12 @@ export class TrainingEnv {
       const actionExecuted = this.executeAction(action, agent)
       this.actionsThisTurn++
 
-      // Reward for buying a duplicate (encourages building toward evolutions)
-      if (isBuy && actionExecuted && buyTargetIndex) {
-        const copies = values(agent.board).filter(
-          (p) => p.index === buyTargetIndex
-        )
-        // copies includes the one we just bought, so >=2 means duplicate
-        if (copies.length >= 2) {
-          reward += REWARD_BUY_DUPLICATE
-        }
+      // Reward for buying duplicates (encourages building toward evolutions)
+      // Check pre-buy count: 1 existing = 2nd copy, 2 existing = 3rd copy (evolution!)
+      if (isBuy && actionExecuted && preBuyCopies >= 2) {
+        reward += REWARD_BUY_EVOLUTION
+      } else if (isBuy && actionExecuted && preBuyCopies === 1) {
+        reward += REWARD_BUY_DUPLICATE
       }
 
       // Move fidget penalty: 2 free moves, then -0.03 per consecutive move
@@ -2322,29 +2324,32 @@ export class TrainingEnv {
         // but fall through to normal processing as safety
       }
 
-      // Snapshot shop name before buy for duplicate reward
+      // Snapshot existing copy count BEFORE buy (evolution merges copies)
       const isBuyBatch = action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5
-      let buyTargetIndexBatch: string | undefined
+      let preBuyCopiesBatch = 0
       if (isBuyBatch) {
         const shopIdx = action - TrainingAction.BUY_0
         const shopName = player.shop[shopIdx]
         if (shopName && shopName !== Pkm.DEFAULT) {
-          buyTargetIndexBatch = getPokemonData(shopName)?.index
+          const targetIndex = getPokemonData(shopName)?.index
+          if (targetIndex) {
+            preBuyCopiesBatch = values(player.board).filter(
+              (p) => p.index === targetIndex
+            ).length
+          }
         }
       }
 
       // Execute normal PICK phase action
       const actionExecutedBatch = this.executeAction(action, player)
 
-      // Reward for buying a duplicate (encourages building toward evolutions)
-      if (isBuyBatch && actionExecutedBatch && buyTargetIndexBatch) {
-        const copies = values(player.board).filter(
-          (p) => p.index === buyTargetIndexBatch
-        )
-        if (copies.length >= 2) {
-          const prev = dupBuyRewards.get(playerId) ?? 0
-          dupBuyRewards.set(playerId, prev + REWARD_BUY_DUPLICATE)
-        }
+      // Reward for buying duplicates (encourages building toward evolutions)
+      if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch >= 2) {
+        const prev = dupBuyRewards.get(playerId) ?? 0
+        dupBuyRewards.set(playerId, prev + REWARD_BUY_EVOLUTION)
+      } else if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch === 1) {
+        const prev = dupBuyRewards.get(playerId) ?? 0
+        dupBuyRewards.set(playerId, prev + REWARD_BUY_DUPLICATE)
       }
 
       const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
