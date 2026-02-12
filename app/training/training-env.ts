@@ -325,6 +325,7 @@ export class TrainingEnv {
     this.itemPairCache.clear()
     this.observationCache.clear()
     this.observationDirty.clear()
+    this.botSynergies.clear()
     this.resetTurnState()
 
     return {
@@ -1198,9 +1199,17 @@ export class TrainingEnv {
       enemyKills.set(player.id, Math.max(0, initial - surviving))
     })
 
-    // Now stop all simulations (clears teams)
+    // Now stop all simulations (clears teams) and scrub retained objects
     this.state.simulations.forEach((simulation) => {
       simulation.stop()
+      // stop() clears teams + room ref, but leaves DPS meters, effects,
+      // abilities, and board alive — leak ~30 objects per simulation per episode
+      simulation.blueDpsMeter?.clear()
+      simulation.redDpsMeter?.clear()
+      simulation.blueEffects?.clear()
+      simulation.redEffects?.clear()
+      simulation.blueAbilitiesCast.length = 0
+      simulation.redAbilitiesCast.length = 0
     })
 
     // Compute streak

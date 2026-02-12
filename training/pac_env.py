@@ -28,6 +28,7 @@ HEALTH_TIMEOUT = 10  # for init/space-query calls
 RESET_MAX_RETRIES = 3
 RESET_BACKOFF_BASE = 2  # exponential backoff: 2s, 4s, 8s
 RESTART_HEALTH_TIMEOUT = 60  # seconds to wait for restarted server
+SERVER_ROTATION_EPISODES = 200  # proactive restart every N episodes to shed leaked memory
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -126,6 +127,7 @@ class PokemonAutoChessEnv(gym.Env):
         self._server_cmd = server_cmd
         self._server_cwd = server_cwd
         self._server_proc = None
+        self._episode_count = 0  # episodes since last server restart
 
         # Query server for space dimensions
         try:
@@ -229,6 +231,18 @@ class PokemonAutoChessEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+
+        # Proactive server rotation: restart before memory pressure causes hangs
+        self._episode_count += 1
+        if (
+            self._server_cmd is not None
+            and self._episode_count % SERVER_ROTATION_EPISODES == 0
+        ):
+            print(
+                f"ROTATION: Proactive restart of server on port {self.port} "
+                f"after {self._episode_count} episodes"
+            )
+            self._restart_server()
 
         last_error = None
         for attempt in range(RESET_MAX_RETRIES):
