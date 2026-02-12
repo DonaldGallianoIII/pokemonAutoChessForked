@@ -1721,18 +1721,18 @@ export class TrainingEnv {
     // Bots carry no items to keep difficulty approachable.
     let slots: Slot[]
 
-    if (stage >= 28) {
+    if (stage >= 29) {
       slots = [
         s("UNIQUE",3), s("LEGENDARY",3),
         s("EPIC",2), s("EPIC",2), s("EPIC",2), s("EPIC",2), s("EPIC",2),
         s("ULTRA",2), s("ULTRA",2)
       ]
-    } else if (stage >= 25) {
+    } else if (stage >= 26) {
       slots = [
         s("UNIQUE",3), s("LEGENDARY",3),
         s("RARE",3), s("RARE",3), s("EPIC",2), s("EPIC",2), s("ULTRA",2), s("ULTRA",1)
       ]
-    } else if (stage >= 21) {
+    } else if (stage >= 23) {
       slots = [
         s("UNIQUE",3), s("LEGENDARY",3),
         s("RARE",2), s("RARE",2), s("EPIC",2), s("EPIC",1), s("EPIC",1), s("ULTRA",1)
