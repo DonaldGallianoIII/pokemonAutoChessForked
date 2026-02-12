@@ -124,6 +124,7 @@ export const REWARD_LEVEL_UP = 0.10
 // Reroll reward: unconditional small incentive to refresh shop
 // Teaches the agent that rerolling exists and is useful (find duplicates, upgrades, etc.)
 export const REWARD_REROLL = 0.03
+export const REWARD_REROLL_LATEGAME = 0.05   // after stage 20, stronger push to spend gold on rerolls
 
 // Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
 export const REWARD_KEEP_UNIQUE = 0.007
@@ -132,6 +133,9 @@ export const REWARD_KEEP_LEGENDARY = 0.007
 // Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
 export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
 export const REWARD_BUY_EVOLUTION = 0.20     // buying 3rd copy (triggers evolution)
+// Late-game boost: after stage 20, reward evolutions more to encourage spending gold
+export const REWARD_BUY_DUPLICATE_LATEGAME = 0.12   // buying 2nd copy (stage 20+)
+export const REWARD_BUY_EVOLUTION_LATEGAME = 0.30    // buying 3rd copy (stage 20+)
 
 // Gold hoarding penalty: applied per excess gold above threshold at end of each stage.
 // Interest caps at 50g held; early game allows saving for levels, late game punishes harder.

@@ -82,7 +82,9 @@ import {
   GOLD_MIN_TARGETS,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
+  REWARD_BUY_DUPLICATE_LATEGAME,
   REWARD_BUY_EVOLUTION,
+  REWARD_BUY_EVOLUTION_LATEGAME,
   REWARD_GOLD_EXCESS_PENALTY,
   REWARD_GOLD_LATEGAME_TIER1,
   REWARD_GOLD_LATEGAME_TIER2,
@@ -91,6 +93,7 @@ import {
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
+  REWARD_REROLL_LATEGAME,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
@@ -368,10 +371,12 @@ export class TrainingEnv {
 
       // Reward for buying duplicates (encourages building toward evolutions)
       // Check pre-buy count: 1 existing = 2nd copy, 2 existing = 3rd copy (evolution!)
+      // After stage 20, boost rewards to encourage spending gold on upgrades.
+      const lateGame = this.state.stageLevel > 20
       if (isBuy && actionExecuted && preBuyCopies >= 2) {
-        reward += REWARD_BUY_EVOLUTION
+        reward += lateGame ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION
       } else if (isBuy && actionExecuted && preBuyCopies === 1) {
-        reward += REWARD_BUY_DUPLICATE
+        reward += lateGame ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE
       }
 
       // Move fidget penalty: 2 free moves, then penalty per consecutive move
@@ -413,9 +418,9 @@ export class TrainingEnv {
         }
       }
 
-      // Reroll reward: unconditional incentive to refresh shop
+      // Reroll reward: unconditional incentive to refresh shop (boosted late game)
       if (action === TrainingAction.REFRESH && actionExecuted) {
-        reward += REWARD_REROLL
+        reward += lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
       }
 
       // Per-step bonus for keeping unique/legendary units on board
@@ -2483,12 +2488,14 @@ export class TrainingEnv {
       const actionExecutedBatch = this.executeAction(action, player)
 
       // Reward for buying duplicates (encourages building toward evolutions)
+      // After stage 20, boost rewards to encourage spending gold on upgrades.
+      const lateGameBatch = this.state.stageLevel > 20
       if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch >= 2) {
         const prev = dupBuyRewards.get(playerId) ?? 0
-        dupBuyRewards.set(playerId, prev + REWARD_BUY_EVOLUTION)
+        dupBuyRewards.set(playerId, prev + (lateGameBatch ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION))
       } else if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch === 1) {
         const prev = dupBuyRewards.get(playerId) ?? 0
-        dupBuyRewards.set(playerId, prev + REWARD_BUY_DUPLICATE)
+        dupBuyRewards.set(playerId, prev + (lateGameBatch ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE))
       }
 
       const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
