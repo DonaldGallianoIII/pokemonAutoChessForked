@@ -108,6 +108,9 @@ import {
   REWARD_PLACEMENT_OFFSET,
   REWARD_PLACEMENT_SCALE,
   REWARD_SYNERGY_THRESHOLD,
+  REWARD_SYNERGY_SUSTAINED,
+  REWARD_SYNERGY_MULTI_BONUS,
+  REWARD_SYNERGY_MULTI_CAP,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
@@ -1095,7 +1098,22 @@ export class TrainingEnv {
     // Run all simulations synchronously
     let steps = 0
     let allFinished = false
+    const wallClockStart = Date.now()
+    const WALL_CLOCK_LIMIT_MS = 15_000 // 15s hard cap — well under the 30s HTTP timeout
     while (!allFinished && steps < TRAINING_MAX_FIGHT_STEPS) {
+      if (steps % 100 === 0 && Date.now() - wallClockStart > WALL_CLOCK_LIMIT_MS) {
+        console.error(
+          `[Training] Simulation wall-clock timeout after ${steps} steps ` +
+          `(${Date.now() - wallClockStart}ms), forcing all to DRAW`
+        )
+        this.state.simulations.forEach((simulation) => {
+          if (!simulation.finished) {
+            simulation.finished = true
+            simulation.winnerId = ""
+          }
+        })
+        break
+      }
       allFinished = true
       this.state.simulations.forEach((simulation) => {
         if (!simulation.finished) {
@@ -1215,6 +1233,24 @@ export class TrainingEnv {
         const delta = currentThresholds - this.prevActiveSynergyCount
         if (delta > 0) {
           rewards.set(id, (rewards.get(id) ?? 0) + delta * REWARD_SYNERGY_THRESHOLD)
+        }
+      }
+    })
+
+    // 6.2b: Sustained synergy reward — ongoing bonus for maintaining strong comps.
+    // Uses real SynergyTriggers breakpoints per synergy type. Higher tiers and
+    // stacking multiple synergies at tier 2+ earn a multiplicative bonus.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      if (id === this.agentId) {
+        const { totalTiers, qualifyingCount } = this.computeSynergyTierInfo(player)
+        if (totalTiers > 0) {
+          const basePoints = totalTiers * REWARD_SYNERGY_SUSTAINED
+          const multiplier = Math.min(
+            1.0 + qualifyingCount * REWARD_SYNERGY_MULTI_BONUS,
+            REWARD_SYNERGY_MULTI_CAP
+          )
+          rewards.set(id, (rewards.get(id) ?? 0) + basePoints * multiplier)
         }
       }
     })
@@ -1685,18 +1721,18 @@ export class TrainingEnv {
     // Bots carry no items to keep difficulty approachable.
     let slots: Slot[]
 
-    if (stage >= 28) {
+    if (stage >= 29) {
       slots = [
         s("UNIQUE",3), s("LEGENDARY",3),
         s("EPIC",2), s("EPIC",2), s("EPIC",2), s("EPIC",2), s("EPIC",2),
         s("ULTRA",2), s("ULTRA",2)
       ]
-    } else if (stage >= 25) {
+    } else if (stage >= 26) {
       slots = [
         s("UNIQUE",3), s("LEGENDARY",3),
         s("RARE",3), s("RARE",3), s("EPIC",2), s("EPIC",2), s("ULTRA",2), s("ULTRA",1)
       ]
-    } else if (stage >= 21) {
+    } else if (stage >= 23) {
       slots = [
         s("UNIQUE",3), s("LEGENDARY",3),
         s("RARE",2), s("RARE",2), s("EPIC",2), s("EPIC",1), s("EPIC",1), s("ULTRA",1)
@@ -2207,6 +2243,31 @@ export class TrainingEnv {
       }
     })
     return count
+  }
+
+  /**
+   * Compute detailed synergy tier info using real SynergyTriggers breakpoints.
+   * Returns { totalTiers, qualifyingCount } where:
+   *   totalTiers  = sum of tier levels reached across all synergies
+   *   qualifyingCount = number of synergies at tier 2+
+   */
+  private computeSynergyTierInfo(player: Player): { totalTiers: number; qualifyingCount: number } {
+    let totalTiers = 0
+    let qualifyingCount = 0
+    player.synergies.forEach((value, synergy) => {
+      const triggers = SynergyTriggers[synergy as Synergy]
+      if (!triggers || triggers.length === 0) return
+      let tierReached = 0
+      for (const threshold of triggers) {
+        if (value >= threshold) tierReached++
+        else break
+      }
+      if (tierReached > 0) {
+        totalTiers += tierReached
+        if (tierReached >= 2) qualifyingCount++
+      }
+    })
+    return { totalTiers, qualifyingCount }
   }
 
   private computeFinalReward(agent: Player): number {
