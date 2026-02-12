@@ -165,9 +165,12 @@ if __name__ == "__main__":
 
     # Quick sanity: hit both health endpoints one more time
     for _, port in servers:
-        resp = requests.get(f"http://localhost:{port}/health", timeout=10)
-        data = resp.json()
-        print(f"  Port {port}: {data}")
+        try:
+            resp = requests.get(f"http://localhost:{port}/health", timeout=10)
+            data = resp.json()
+            print(f"  Port {port}: {data}")
+        except Exception as e:
+            print(f"  Port {port}: health check failed ({type(e).__name__}: {e})")
 
     print("\nShutting down...")
     cleanup()

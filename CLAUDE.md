@@ -25,7 +25,7 @@ When completing a task, always end with a summary listing:
 ## Key Technical Context
 
 - Training envs communicate with Node.js game servers via HTTP (`requests` library)
-- All HTTP calls must have explicit `timeout=` parameters (30s for step/reset, 10s for health/init)
+- All HTTP calls must have explicit `timeout=` parameters (15s for step/reset, 10s for health/init)
 - `pac_env.py` is used inside `SubprocVecEnv` — a timeout in one env blocks ALL envs, so step() timeouts return a terminal state instead of raising
 - `selfplay_vec_env.py` manages 8 player seats in one game via `/step-multi` batched calls
 - MaskablePPO requires valid `action_masks` in info dicts at all times, including error/timeout paths

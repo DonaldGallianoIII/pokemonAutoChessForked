@@ -23,7 +23,8 @@ import requests
 from gymnasium import spaces
 
 # Timeout constants (seconds)
-STEP_TIMEOUT = 30    # for step() and reset() calls
+STEP_TIMEOUT = 15    # for step() and reset() calls — 15s is generous (normal <1s);
+                     # lower than 30s to reduce SubprocVecEnv stalls when a server hangs
 HEALTH_TIMEOUT = 10  # for init/space-query calls
 RESET_MAX_RETRIES = 3
 RESET_BACKOFF_BASE = 2  # exponential backoff: 2s, 4s, 8s
@@ -316,6 +317,10 @@ class PokemonAutoChessEnv(gym.Env):
                 f"WARNING: Server on port {self.port} error during step: "
                 f"{type(e).__name__}: {e}"
             )
+            # Proactively restart the server NOW so the auto-reset that follows
+            # doesn't cascade into 3 more timeouts (3 × 15s = 45s extra stall).
+            if self._server_cmd is not None:
+                self._restart_server()
             # Return a terminal state so SubprocVecEnv will auto-reset this env
             obs = self._last_obs
             reward = 0.0
