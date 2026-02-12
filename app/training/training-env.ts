@@ -108,6 +108,9 @@ import {
   REWARD_PLACEMENT_OFFSET,
   REWARD_PLACEMENT_SCALE,
   REWARD_SYNERGY_THRESHOLD,
+  REWARD_SYNERGY_SUSTAINED,
+  REWARD_SYNERGY_MULTI_BONUS,
+  REWARD_SYNERGY_MULTI_CAP,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
@@ -1234,6 +1237,24 @@ export class TrainingEnv {
       }
     })
 
+    // 6.2b: Sustained synergy reward — ongoing bonus for maintaining strong comps.
+    // Uses real SynergyTriggers breakpoints per synergy type. Higher tiers and
+    // stacking multiple synergies at tier 2+ earn a multiplicative bonus.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      if (id === this.agentId) {
+        const { totalTiers, qualifyingCount } = this.computeSynergyTierInfo(player)
+        if (totalTiers > 0) {
+          const basePoints = totalTiers * REWARD_SYNERGY_SUSTAINED
+          const multiplier = Math.min(
+            1.0 + qualifyingCount * REWARD_SYNERGY_MULTI_BONUS,
+            REWARD_SYNERGY_MULTI_CAP
+          )
+          rewards.set(id, (rewards.get(id) ?? 0) + basePoints * multiplier)
+        }
+      }
+    })
+
     // 6.3: Combat damage — reward enemy kills
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
@@ -2222,6 +2243,31 @@ export class TrainingEnv {
       }
     })
     return count
+  }
+
+  /**
+   * Compute detailed synergy tier info using real SynergyTriggers breakpoints.
+   * Returns { totalTiers, qualifyingCount } where:
+   *   totalTiers  = sum of tier levels reached across all synergies
+   *   qualifyingCount = number of synergies at tier 2+
+   */
+  private computeSynergyTierInfo(player: Player): { totalTiers: number; qualifyingCount: number } {
+    let totalTiers = 0
+    let qualifyingCount = 0
+    player.synergies.forEach((value, synergy) => {
+      const triggers = SynergyTriggers[synergy as Synergy]
+      if (!triggers || triggers.length === 0) return
+      let tierReached = 0
+      for (const threshold of triggers) {
+        if (value >= threshold) tierReached++
+        else break
+      }
+      if (tierReached > 0) {
+        totalTiers += tierReached
+        if (tierReached >= 2) qualifyingCount++
+      }
+    })
+    return { totalTiers, qualifyingCount }
   }
 
   private computeFinalReward(agent: Player): number {
