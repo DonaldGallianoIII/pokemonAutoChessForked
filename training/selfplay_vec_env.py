@@ -118,11 +118,12 @@ class SelfPlayVecEnv(VecEnv):
                 self._last_obs = all_obs
 
                 return all_obs
-            except requests.exceptions.Timeout as e:
+            except Exception as e:
                 last_error = e
                 backoff = RESET_BACKOFF_BASE ** (attempt + 1)
                 print(
-                    f"WARNING: Server on port {self._port} timed out during reset "
+                    f"WARNING: Server on port {self._port} error during reset: "
+                    f"{type(e).__name__}: {e} "
                     f"(attempt {attempt + 1}/{RESET_MAX_RETRIES}), retrying in {backoff}s"
                 )
                 time.sleep(backoff)
@@ -145,10 +146,10 @@ class SelfPlayVecEnv(VecEnv):
                 json={"actions": self._pending_actions.tolist()},
                 timeout=STEP_TIMEOUT,
             ).json()
-        except requests.exceptions.Timeout:
+        except Exception as e:
             print(
-                f"WARNING: Server on port {self._port} timed out during step, "
-                f"forcing reset"
+                f"WARNING: Server on port {self._port} error during step: "
+                f"{type(e).__name__}: {e}"
             )
             self._pending_actions = None
             # Return terminal state for all 8 players — triggers auto-reset
