@@ -275,6 +275,10 @@ def train(
     if resume_from and (os.path.exists(resume_from) or os.path.exists(resume_from + ".zip")):
         print(f"Resuming from checkpoint: {resume_from}")
         model = MaskablePPO.load(resume_from, env=env)
+        # Override saved hyperparameters with CLI values
+        # (SB3 .load() restores the checkpoint's saved LR, ignoring CLI args)
+        model.learning_rate = learning_rate
+        print(f"  LR overridden to: {learning_rate}")
     else:
         if resume_from:
             print(f"WARNING: --resume path not found: {resume_from} (also tried {resume_from}.zip)")
