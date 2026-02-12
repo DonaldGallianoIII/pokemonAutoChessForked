@@ -162,7 +162,7 @@ if __name__ == "__main__":
 
     # Quick sanity: hit both health endpoints one more time
     for _, port in servers:
-        resp = requests.get(f"http://localhost:{port}/health")
+        resp = requests.get(f"http://localhost:{port}/health", timeout=10)
         data = resp.json()
         print(f"  Port {port}: {data}")
 
