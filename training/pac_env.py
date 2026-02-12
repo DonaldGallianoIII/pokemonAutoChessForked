@@ -98,11 +98,12 @@ class PokemonAutoChessEnv(gym.Env):
                 info["action_masks"] = self._current_action_mask
                 self._last_obs = obs
                 return obs, info
-            except requests.exceptions.Timeout as e:
+            except Exception as e:
                 last_error = e
                 backoff = RESET_BACKOFF_BASE ** (attempt + 1)
                 print(
-                    f"WARNING: Server on port {self.port} timed out during reset "
+                    f"WARNING: Server on port {self.port} error during reset: "
+                    f"{type(e).__name__}: {e} "
                     f"(attempt {attempt + 1}/{RESET_MAX_RETRIES}), retrying in {backoff}s"
                 )
                 time.sleep(backoff)
@@ -120,10 +121,10 @@ class PokemonAutoChessEnv(gym.Env):
                 json={"action": action},
                 timeout=STEP_TIMEOUT,
             ).json()
-        except requests.exceptions.Timeout:
+        except Exception as e:
             print(
-                f"WARNING: Server on port {self.port} timed out during step, "
-                f"forcing reset"
+                f"WARNING: Server on port {self.port} error during step: "
+                f"{type(e).__name__}: {e}"
             )
             # Return a terminal state so SubprocVecEnv will auto-reset this env
             obs = self._last_obs
