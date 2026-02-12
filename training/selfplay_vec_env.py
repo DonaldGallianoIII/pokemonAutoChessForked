@@ -35,7 +35,8 @@ from gymnasium import spaces
 from stable_baselines3.common.vec_env import VecEnv
 
 # Timeout constants (seconds)
-STEP_TIMEOUT = 30    # for step-multi and reset calls
+STEP_TIMEOUT = 15    # for step-multi and reset calls — 15s is generous (normal <1s);
+                     # lower than 30s to reduce stalls when a server hangs
 HEALTH_TIMEOUT = 10  # for init/space-query calls
 RESET_MAX_RETRIES = 3
 RESET_BACKOFF_BASE = 2  # exponential backoff: 2s, 4s, 8s

@@ -160,7 +160,11 @@ def wait_for_server(url: str, timeout: int = 60):
 def benchmark_env(url: str):
     """Run a benchmark game and report speed."""
     print("\nRunning benchmark (full game with random actions)...")
-    resp = requests.post(f"{url}/benchmark", timeout=30).json()
+    try:
+        resp = requests.post(f"{url}/benchmark", timeout=30).json()
+    except Exception as e:
+        print(f"  WARNING: Benchmark failed ({type(e).__name__}: {e}), skipping.")
+        return None
     print(f"  Steps:          {resp['steps']}")
     print(f"  Elapsed:        {resp['elapsedMs']}ms")
     print(f"  Steps/sec:      {resp['stepsPerSecond']:.0f}")

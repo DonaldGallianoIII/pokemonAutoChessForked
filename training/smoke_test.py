@@ -25,21 +25,25 @@ import time
 import numpy as np
 import requests
 
+# Timeout constants (seconds) — match pac_env.py values
+STEP_TIMEOUT = 15    # for step/reset calls
+HEALTH_TIMEOUT = 10  # for space-query calls
+
 
 def smoke_test_single_agent(server_url: str, n_games: int = 10):
     """Smoke test for single-agent mode (1 RL agent + 7 bots)."""
     print(f"=== Smoke Test: Single Agent ({n_games} games) ===\n")
 
     # Get space dimensions
-    obs_size = requests.get(f"{server_url}/observation-space").json()["n"]
-    num_actions = requests.get(f"{server_url}/action-space").json()["n"]
+    obs_size = requests.get(f"{server_url}/observation-space", timeout=HEALTH_TIMEOUT).json()["n"]
+    num_actions = requests.get(f"{server_url}/action-space", timeout=HEALTH_TIMEOUT).json()["n"]
 
     results = []
     errors = []
 
     for game_idx in range(n_games):
         try:
-            resp = requests.post(f"{server_url}/reset").json()
+            resp = requests.post(f"{server_url}/reset", timeout=STEP_TIMEOUT).json()
             obs = np.array(resp["observation"], dtype=np.float32)
             mask = np.array(resp["info"]["actionMask"], dtype=np.int8)
             done = False
@@ -79,7 +83,8 @@ def smoke_test_single_agent(server_url: str, n_games: int = 10):
                 # Pick random valid action
                 action = int(np.random.choice(valid_actions))
                 resp = requests.post(
-                    f"{server_url}/step", json={"action": action}
+                    f"{server_url}/step", json={"action": action},
+                    timeout=STEP_TIMEOUT,
                 ).json()
 
                 obs = np.array(resp["observation"], dtype=np.float32)
@@ -123,15 +128,15 @@ def smoke_test_self_play(server_url: str, n_games: int = 10):
     """Smoke test for self-play mode (8 RL agents)."""
     print(f"=== Smoke Test: Self-Play ({n_games} games) ===\n")
 
-    obs_size = requests.get(f"{server_url}/observation-space").json()["n"]
-    num_actions = requests.get(f"{server_url}/action-space").json()["n"]
+    obs_size = requests.get(f"{server_url}/observation-space", timeout=HEALTH_TIMEOUT).json()["n"]
+    num_actions = requests.get(f"{server_url}/action-space", timeout=HEALTH_TIMEOUT).json()["n"]
 
     results = []
     errors = []
 
     for game_idx in range(n_games):
         try:
-            resp = requests.post(f"{server_url}/reset").json()
+            resp = requests.post(f"{server_url}/reset", timeout=STEP_TIMEOUT).json()
             # Initial obs is player 0's view, broadcast for initial masks
             init_mask = np.array(resp["info"]["actionMask"], dtype=np.int8)
             masks = np.tile(init_mask, (8, 1))
@@ -156,7 +161,8 @@ def smoke_test_self_play(server_url: str, n_games: int = 10):
                         actions.append(int(np.random.choice(valid)))
 
                 resp = requests.post(
-                    f"{server_url}/step-multi", json={"actions": actions}
+                    f"{server_url}/step-multi", json={"actions": actions},
+                    timeout=STEP_TIMEOUT,
                 ).json()
 
                 obs_batch = np.array(resp["observations"], dtype=np.float32)
