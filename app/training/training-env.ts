@@ -106,8 +106,7 @@ import {
   REWARD_PER_LOSS,
   REWARD_PER_SURVIVE_ROUND,
   REWARD_PER_WIN,
-  REWARD_PLACEMENT_OFFSET,
-  REWARD_PLACEMENT_SCALE,
+  REWARD_PLACEMENT_TABLE,
   REWARD_SYNERGY_THRESHOLD,
   REWARD_SYNERGY_SUSTAINED,
   REWARD_SYNERGY_MULTI_BONUS,
@@ -2325,7 +2324,8 @@ export class TrainingEnv {
 
   private computeFinalReward(agent: Player): number {
     // Reward based on final placement: rank 1 = best, rank 8 = worst
-    return (9 - agent.rank) * REWARD_PLACEMENT_SCALE - REWARD_PLACEMENT_OFFSET
+    const idx = Math.max(0, Math.min(agent.rank - 1, REWARD_PLACEMENT_TABLE.length - 1))
+    return REWARD_PLACEMENT_TABLE[idx]
   }
 
   private getInfo(playerId?: string): StepResult["info"] {
