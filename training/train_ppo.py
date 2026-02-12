@@ -40,6 +40,7 @@ from stable_baselines3.common.callbacks import (
 )
 from stable_baselines3.common.monitor import Monitor
 
+from launch_servers import SERVER_CMD, PROJECT_ROOT
 from pac_env import PokemonAutoChessEnv
 
 
@@ -240,7 +241,11 @@ def train(
         # SubprocVecEnv requires factory functions (closures), not env instances
         def make_parallel_env(port):
             def _init():
-                env = PokemonAutoChessEnv(server_url=f"http://localhost:{port}")
+                env = PokemonAutoChessEnv(
+                    server_url=f"http://localhost:{port}",
+                    server_cmd=SERVER_CMD,
+                    server_cwd=PROJECT_ROOT,
+                )
                 env = Monitor(env)
                 return env
             return _init

@@ -2895,8 +2895,10 @@ export class WishStrategy extends AbilityStrategy {
       ) as PokemonEntity[]
     ).sort((a, b) => a.hp / a.maxHP - b.hp / b.maxHP)[0]
     const shield = [30, 60, 120][pokemon.stars - 1] ?? 120
-    lowestHealthAlly.addShield(shield, pokemon, 1, crit)
-    lowestHealthAlly.status.triggerProtect(1500)
+    if (lowestHealthAlly) {
+      lowestHealthAlly.addShield(shield, pokemon, 1, crit)
+      lowestHealthAlly.status.triggerProtect(1500)
+    }
   }
 }
 
