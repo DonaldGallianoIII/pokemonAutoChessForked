@@ -261,10 +261,14 @@ def train(
         env = make_env(server_url)
 
     # Create or load model
-    if resume_from and os.path.exists(resume_from):
+    # SB3 saves checkpoints as .zip; MaskablePPO.load() auto-appends .zip,
+    # but we must also check for it here so the guard doesn't fall through.
+    if resume_from and (os.path.exists(resume_from) or os.path.exists(resume_from + ".zip")):
         print(f"Resuming from checkpoint: {resume_from}")
         model = MaskablePPO.load(resume_from, env=env)
     else:
+        if resume_from:
+            print(f"WARNING: --resume path not found: {resume_from} (also tried {resume_from}.zip)")
         print("Creating new MaskablePPO model...")
         model = MaskablePPO(
             "MlpPolicy",
