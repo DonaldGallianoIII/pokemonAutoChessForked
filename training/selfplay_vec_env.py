@@ -26,10 +26,25 @@ Usage:
     obs, rewards, dones, infos = env.step(actions)
 """
 
+import time
+from urllib.parse import urlparse
+
 import numpy as np
 import requests
 from gymnasium import spaces
 from stable_baselines3.common.vec_env import VecEnv
+
+# Timeout constants (seconds)
+STEP_TIMEOUT = 30    # for step-multi and reset calls
+HEALTH_TIMEOUT = 10  # for init/space-query calls
+RESET_MAX_RETRIES = 3
+RESET_BACKOFF_BASE = 2  # exponential backoff: 2s, 4s, 8s
+
+
+def _port_from_url(url: str) -> str:
+    """Extract port from server URL for logging."""
+    parsed = urlparse(url)
+    return str(parsed.port or "unknown")
 
 
 class SelfPlayVecEnv(VecEnv):
@@ -43,11 +58,16 @@ class SelfPlayVecEnv(VecEnv):
 
     def __init__(self, server_url: str = "http://localhost:9100"):
         self.server_url = server_url.rstrip("/")
+        self._port = _port_from_url(self.server_url)
 
         # Query server for space dimensions
         try:
-            action_info = requests.get(f"{self.server_url}/action-space").json()
-            obs_info = requests.get(f"{self.server_url}/observation-space").json()
+            action_info = requests.get(
+                f"{self.server_url}/action-space", timeout=HEALTH_TIMEOUT
+            ).json()
+            obs_info = requests.get(
+                f"{self.server_url}/observation-space", timeout=HEALTH_TIMEOUT
+            ).json()
         except requests.exceptions.ConnectionError:
             raise ConnectionError(
                 f"Could not connect to training server at {self.server_url}. "
@@ -69,28 +89,48 @@ class SelfPlayVecEnv(VecEnv):
         )
 
         self._action_masks = np.ones((8, self._num_actions), dtype=np.int8)
+        self._last_obs = np.zeros((8, self._obs_size), dtype=np.float32)
         self._pending_actions = None
 
     def reset(self) -> np.ndarray:
-        response = requests.post(f"{self.server_url}/reset").json()
-        obs = np.array(response["observation"], dtype=np.float32)
+        last_error = None
+        for attempt in range(RESET_MAX_RETRIES):
+            try:
+                response = requests.post(
+                    f"{self.server_url}/reset", timeout=STEP_TIMEOUT
+                ).json()
+                obs = np.array(response["observation"], dtype=np.float32)
 
-        # After reset, the server returns a single observation (player 0's view).
-        # For self-play, we do a no-op step to get all 8 observations.
-        # But actually, at stage 0, all players have propositions, so we need
-        # the per-player observations from step-multi.
-        # For now, broadcast the initial obs to all 8 sub-envs.
-        # The first step_wait() call will get proper per-player observations.
-        all_obs = np.tile(obs, (8, 1))
+                # After reset, the server returns a single observation (player 0's view).
+                # For self-play, we do a no-op step to get all 8 observations.
+                # But actually, at stage 0, all players have propositions, so we need
+                # the per-player observations from step-multi.
+                # For now, broadcast the initial obs to all 8 sub-envs.
+                # The first step_wait() call will get proper per-player observations.
+                all_obs = np.tile(obs, (8, 1))
 
-        info = response.get("info", {})
-        mask = np.array(
-            info.get("actionMask", np.ones(self._num_actions)),
-            dtype=np.int8,
-        )
-        self._action_masks = np.tile(mask, (8, 1))
+                info = response.get("info", {})
+                mask = np.array(
+                    info.get("actionMask", np.ones(self._num_actions)),
+                    dtype=np.int8,
+                )
+                self._action_masks = np.tile(mask, (8, 1))
+                self._last_obs = all_obs
 
-        return all_obs
+                return all_obs
+            except requests.exceptions.Timeout as e:
+                last_error = e
+                backoff = RESET_BACKOFF_BASE ** (attempt + 1)
+                print(
+                    f"WARNING: Server on port {self._port} timed out during reset "
+                    f"(attempt {attempt + 1}/{RESET_MAX_RETRIES}), retrying in {backoff}s"
+                )
+                time.sleep(backoff)
+
+        raise ConnectionError(
+            f"Server on port {self._port} timed out during reset after "
+            f"{RESET_MAX_RETRIES} retries — server is unresponsive"
+        ) from last_error
 
     def step_async(self, actions: np.ndarray) -> None:
         self._pending_actions = actions
@@ -99,10 +139,29 @@ class SelfPlayVecEnv(VecEnv):
         if self._pending_actions is None:
             raise RuntimeError("step_async must be called before step_wait")
 
-        response = requests.post(
-            f"{self.server_url}/step-multi",
-            json={"actions": self._pending_actions.tolist()},
-        ).json()
+        try:
+            response = requests.post(
+                f"{self.server_url}/step-multi",
+                json={"actions": self._pending_actions.tolist()},
+                timeout=STEP_TIMEOUT,
+            ).json()
+        except requests.exceptions.Timeout:
+            print(
+                f"WARNING: Server on port {self._port} timed out during step, "
+                f"forcing reset"
+            )
+            self._pending_actions = None
+            # Return terminal state for all 8 players — triggers auto-reset
+            obs = self._last_obs
+            rewards = np.zeros(8, dtype=np.float32)
+            dones = np.array([True] * 8, dtype=bool)
+            infos = [
+                {"action_masks": self._action_masks[i], "timeout": True}
+                for i in range(8)
+            ]
+            # Auto-reset since all dones are True (matches normal path below)
+            obs = self.reset()
+            return obs, rewards, dones, infos
 
         self._pending_actions = None
 
@@ -117,6 +176,8 @@ class SelfPlayVecEnv(VecEnv):
             mask = np.array(info.get("actionMask", np.ones(self._num_actions)), dtype=np.int8)
             info["action_masks"] = mask
             self._action_masks[i] = mask
+
+        self._last_obs = obs
 
         # Issue #3: When ALL dones are True, the game has ended.
         # Auto-reset the environment for the next episode.

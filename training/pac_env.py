@@ -10,10 +10,25 @@ Usage:
     obs, reward, terminated, truncated, info = env.step(action)
 """
 
+import time
+from urllib.parse import urlparse
+
 import gymnasium as gym
 import numpy as np
 import requests
 from gymnasium import spaces
+
+# Timeout constants (seconds)
+STEP_TIMEOUT = 30    # for step() and reset() calls
+HEALTH_TIMEOUT = 10  # for init/space-query calls
+RESET_MAX_RETRIES = 3
+RESET_BACKOFF_BASE = 2  # exponential backoff: 2s, 4s, 8s
+
+
+def _port_from_url(url: str) -> str:
+    """Extract port from server URL for logging."""
+    parsed = urlparse(url)
+    return str(parsed.port or "unknown")
 
 
 class PokemonAutoChessEnv(gym.Env):
@@ -35,12 +50,17 @@ class PokemonAutoChessEnv(gym.Env):
         super().__init__()
         self.server_url = server_url.rstrip("/")
         self.use_action_mask = use_action_mask
+        self.port = _port_from_url(self.server_url)
         self.session = requests.Session()
 
         # Query server for space dimensions
         try:
-            action_info = self.session.get(f"{self.server_url}/action-space").json()
-            obs_info = self.session.get(f"{self.server_url}/observation-space").json()
+            action_info = self.session.get(
+                f"{self.server_url}/action-space", timeout=HEALTH_TIMEOUT
+            ).json()
+            obs_info = self.session.get(
+                f"{self.server_url}/observation-space", timeout=HEALTH_TIMEOUT
+            ).json()
         except requests.exceptions.ConnectionError:
             raise ConnectionError(
                 f"Could not connect to training server at {self.server_url}. "
@@ -56,27 +76,62 @@ class PokemonAutoChessEnv(gym.Env):
         )
 
         self._current_action_mask = np.ones(self.num_actions, dtype=np.int8)
+        self._last_obs = np.zeros(self.obs_size, dtype=np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        response = self.session.post(f"{self.server_url}/reset").json()
-        obs = np.array(response["observation"], dtype=np.float32)
-        info = response.get("info", {})
-        self._current_action_mask = np.array(
-            info.get("actionMask", np.ones(self.num_actions)),
-            dtype=np.int8
-        )
-        # sb3-contrib MaskablePPO reads masks via env.action_masks() method.
-        # Also inject into info with both key names for compatibility.
-        info["action_masks"] = self._current_action_mask
-        return obs, info
+
+        last_error = None
+        for attempt in range(RESET_MAX_RETRIES):
+            try:
+                response = self.session.post(
+                    f"{self.server_url}/reset", timeout=STEP_TIMEOUT
+                ).json()
+                obs = np.array(response["observation"], dtype=np.float32)
+                info = response.get("info", {})
+                self._current_action_mask = np.array(
+                    info.get("actionMask", np.ones(self.num_actions)),
+                    dtype=np.int8
+                )
+                # sb3-contrib MaskablePPO reads masks via env.action_masks() method.
+                # Also inject into info with both key names for compatibility.
+                info["action_masks"] = self._current_action_mask
+                self._last_obs = obs
+                return obs, info
+            except requests.exceptions.Timeout as e:
+                last_error = e
+                backoff = RESET_BACKOFF_BASE ** (attempt + 1)
+                print(
+                    f"WARNING: Server on port {self.port} timed out during reset "
+                    f"(attempt {attempt + 1}/{RESET_MAX_RETRIES}), retrying in {backoff}s"
+                )
+                time.sleep(backoff)
+
+        raise ConnectionError(
+            f"Server on port {self.port} timed out during reset after "
+            f"{RESET_MAX_RETRIES} retries — server is unresponsive"
+        ) from last_error
 
     def step(self, action):
         action = int(action)
-        response = self.session.post(
-            f"{self.server_url}/step",
-            json={"action": action}
-        ).json()
+        try:
+            response = self.session.post(
+                f"{self.server_url}/step",
+                json={"action": action},
+                timeout=STEP_TIMEOUT,
+            ).json()
+        except requests.exceptions.Timeout:
+            print(
+                f"WARNING: Server on port {self.port} timed out during step, "
+                f"forcing reset"
+            )
+            # Return a terminal state so SubprocVecEnv will auto-reset this env
+            obs = self._last_obs
+            reward = 0.0
+            terminated = True
+            truncated = True
+            info = {"action_masks": self._current_action_mask, "timeout": True}
+            return obs, reward, terminated, truncated, info
 
         obs = np.array(response["observation"], dtype=np.float32)
         reward = float(response["reward"])
@@ -89,6 +144,7 @@ class PokemonAutoChessEnv(gym.Env):
             dtype=np.int8
         )
         info["action_masks"] = self._current_action_mask
+        self._last_obs = obs
 
         return obs, reward, terminated, truncated, info
 
