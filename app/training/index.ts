@@ -21,6 +21,15 @@ import { logger } from "../utils/logger"
 // Increase buffer for schema encoding (same as main server)
 Encoder.BUFFER_SIZE = 512 * 1024
 
+// Keep the process alive on unexpected errors so the Python trainer
+// gets a proper HTTP 500 instead of a connection-refused.
+process.on("uncaughtException", (err) => {
+  logger.error("Uncaught exception (keeping server alive):", err)
+})
+process.on("unhandledRejection", (reason) => {
+  logger.error("Unhandled rejection (keeping server alive):", reason)
+})
+
 async function main() {
   const skipMongo = process.env.SKIP_MONGO === "true"
   const useMemoryDb = process.env.USE_MEMORY_DB === "true"

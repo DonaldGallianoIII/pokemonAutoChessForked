@@ -12780,11 +12780,10 @@ export class ElectroBallStrategy extends AbilityStrategy {
       const closestTarget = possibleTargets[distances.indexOf(minDistance)]
 
       if (closestTarget && projectileSpeedRemaining > 0) {
-        const nextTarget = possibleTargets[0]
         projectileSpeedRemaining -= 30
         pokemon.commands.push(
           new DelayedCommand(
-            () => bounce(nextTarget, currentTarget),
+            () => bounce(closestTarget, currentTarget),
             delay * minDistance
           )
         )

@@ -1095,7 +1095,22 @@ export class TrainingEnv {
     // Run all simulations synchronously
     let steps = 0
     let allFinished = false
+    const wallClockStart = Date.now()
+    const WALL_CLOCK_LIMIT_MS = 15_000 // 15s hard cap — well under the 30s HTTP timeout
     while (!allFinished && steps < TRAINING_MAX_FIGHT_STEPS) {
+      if (steps % 100 === 0 && Date.now() - wallClockStart > WALL_CLOCK_LIMIT_MS) {
+        console.error(
+          `[Training] Simulation wall-clock timeout after ${steps} steps ` +
+          `(${Date.now() - wallClockStart}ms), forcing all to DRAW`
+        )
+        this.state.simulations.forEach((simulation) => {
+          if (!simulation.finished) {
+            simulation.finished = true
+            simulation.winnerId = ""
+          }
+        })
+        break
+      }
       allFinished = true
       this.state.simulations.forEach((simulation) => {
         if (!simulation.finished) {
