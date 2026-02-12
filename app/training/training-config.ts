@@ -120,6 +120,10 @@ export const REWARD_MOVE_FIDGET = -0.08  // was -0.03, increased to punish oscil
 // Sell penalty: penalize selling evolved (2-3 star) units
 export const REWARD_SELL_EVOLVED = -0.15
 
+// Buy-then-immediately-sell penalty: punishes buying a unit and selling it as the very next action
+// This is pure gold waste — the agent should use REMOVE_SHOP instead
+export const REWARD_BUY_THEN_SELL = -1.0
+
 // Level-up reward: only when board is reasonably filled (boardSize >= maxTeamSize - 2)
 // Prevents the "level to 9 with 3 units" degenerate strategy
 export const REWARD_LEVEL_UP = 0.10
