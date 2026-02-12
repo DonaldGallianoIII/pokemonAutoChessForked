@@ -1129,11 +1129,14 @@ export class TrainingEnv {
     let allFinished = false
     const wallClockStart = Date.now()
     const WALL_CLOCK_LIMIT_MS = 15_000 // 15s hard cap — well under the 30s HTTP timeout
+    const PER_STEP_LIMIT_MS = 5_000    // 5s per individual step — catches single-tick hangs
     while (!allFinished && steps < TRAINING_MAX_FIGHT_STEPS) {
-      if (steps % 100 === 0 && Date.now() - wallClockStart > WALL_CLOCK_LIMIT_MS) {
+      // Check wall clock EVERY step, not every 100 — a single slow tick can block 30s+
+      const elapsed = Date.now() - wallClockStart
+      if (elapsed > WALL_CLOCK_LIMIT_MS) {
         console.error(
           `[Training] Simulation wall-clock timeout after ${steps} steps ` +
-          `(${Date.now() - wallClockStart}ms), forcing all to DRAW`
+          `(${elapsed}ms), forcing all to DRAW`
         )
         this.state.simulations.forEach((simulation) => {
           if (!simulation.finished) {
@@ -1144,8 +1147,20 @@ export class TrainingEnv {
         break
       }
       allFinished = true
+      const stepStart = Date.now()
       this.state.simulations.forEach((simulation) => {
         if (!simulation.finished) {
+          // Per-step budget: if this tick already took too long, force-finish
+          // remaining sims rather than letting pathfinding cascade block forever
+          if (Date.now() - stepStart > PER_STEP_LIMIT_MS) {
+            console.error(
+              `[Training] Simulation ${simulation.id} skipped at step ${steps} ` +
+              `(tick took ${Date.now() - stepStart}ms), forcing DRAW`
+            )
+            simulation.finished = true
+            simulation.winnerId = ""
+            return
+          }
           try {
             simulation.update(TRAINING_SIMULATION_DT)
           } catch (err) {
