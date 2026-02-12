@@ -180,14 +180,14 @@ def make_env(server_url: str):
 def train(
     server_url: str = "http://localhost:9100",
     total_timesteps: int = 500_000,
-    learning_rate: float = 3e-4,
-    n_steps: int = 1024,
-    batch_size: int = 128,
-    n_epochs: int = 10,
+    learning_rate: float = 2e-4,
+    n_steps: int = 2048,
+    batch_size: int = 512,
+    n_epochs: int = 5,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
     clip_range: float = 0.2,
-    ent_coef: float = 0.07,
+    ent_coef: float = 0.05,
     save_dir: str = "training/checkpoints",
     log_dir: str = "training/logs",
     resume_from: Optional[str] = None,
@@ -293,7 +293,7 @@ def train(
     # When transitioning Phase A → B, you can roll back to a Phase A checkpoint
     # if self-play destabilizes.
     checkpoint_cb = CheckpointCallback(
-        save_freq=50_000,
+        save_freq=max(1, 50_000 // num_envs),
         save_path=save_dir,
         name_prefix=checkpoint_prefix,
     )
@@ -365,10 +365,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PPO Training for Pokemon Auto Chess")
     parser.add_argument("--server-url", default="http://localhost:9100", help="Training server URL")
     parser.add_argument("--timesteps", type=int, default=500_000, help="Total training timesteps")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--batch-size", type=int, default=256, help="Batch size")
     parser.add_argument("--n-steps", type=int, default=1024, help="Steps per rollout")
-    parser.add_argument("--ent-coef", type=float, default=0.07, help="Entropy coefficient")
+    parser.add_argument("--ent-coef", type=float, default=0.10, help="Entropy coefficient")
     parser.add_argument("--save-dir", default="training/checkpoints", help="Checkpoint directory")
     parser.add_argument("--log-dir", default="training/logs", help="TensorBoard log directory")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint path")
