@@ -277,7 +277,10 @@ def train(
         model = MaskablePPO.load(resume_from, env=env)
         # Override saved hyperparameters with CLI values
         # (SB3 .load() restores the checkpoint's saved LR, ignoring CLI args)
+        # Must set both: learning_rate (the stored value) AND lr_schedule
+        # (the callable SB3 actually uses each update step).
         model.learning_rate = learning_rate
+        model.lr_schedule = lambda _: learning_rate
         print(f"  LR overridden to: {learning_rate}")
     else:
         if resume_from:
