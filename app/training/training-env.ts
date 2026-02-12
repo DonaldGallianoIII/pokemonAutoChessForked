@@ -99,6 +99,7 @@ import {
   REWARD_KEEP_UNIQUE,
   REWARD_INTEREST_BONUS,
   REWARD_SELL_EVOLVED,
+  REWARD_BUY_THEN_SELL,
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
   REWARD_PER_KILL,
@@ -169,6 +170,9 @@ export class TrainingEnv {
   consecutiveMoves = 0
   lastMoveCell = -1  // last MOVE target cell, used to prevent back-and-forth oscillation
   lastSoldStars = 0  // stars of the last sold unit, for sell penalty
+  lastSoldName: string | null = null  // name of last sold unit, for buy-then-sell detection
+  lastBoughtName: string | null = null  // name of last bought unit, for buy-then-sell detection
+  lastActionWasBuy = false  // true if the immediately previous action was a successful BUY
   lockShopUsedThisTurn = false  // prevent LOCK_SHOP spam (toggle once per turn max)
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
@@ -309,6 +313,9 @@ export class TrainingEnv {
     this.consecutiveMoves = 0
     this.lastMoveCell = -1
     this.lastSoldStars = 0
+    this.lastSoldName = null
+    this.lastBoughtName = null
+    this.lastActionWasBuy = false
     this.lockShopUsedThisTurn = false
     this.totalSteps = 0
     this.lastBattleResult = null
@@ -355,10 +362,12 @@ export class TrainingEnv {
       // Snapshot shop name + existing copy count BEFORE buy (evolution merges copies)
       const isBuy = action >= TrainingAction.BUY_0 && action <= TrainingAction.BUY_5
       let preBuyCopies = 0
+      let preBuyShopName: string | null = null
       if (isBuy) {
         const shopIdx = action - TrainingAction.BUY_0
         const shopName = agent.shop[shopIdx]
         if (shopName && shopName !== Pkm.DEFAULT) {
+          preBuyShopName = shopName
           const targetIndex = getPokemonData(shopName)?.index
           if (targetIndex) {
             preBuyCopies = values(agent.board).filter(
@@ -407,6 +416,25 @@ export class TrainingEnv {
         // (unit is gone now, but we can check from pre-sell snapshot)
         // We'll detect this from the sell action itself
         reward += this.lastSoldStars >= 2 ? REWARD_SELL_EVOLVED : 0
+
+        // Buy-then-immediately-sell penalty: buying a unit and selling it as the
+        // very next action is pure gold waste. Use REMOVE_SHOP instead.
+        if (this.lastActionWasBuy && this.lastBoughtName && this.lastSoldName) {
+          const soldIndex = getPokemonData(this.lastSoldName as any)?.index
+          const boughtIndex = getPokemonData(this.lastBoughtName as any)?.index
+          if (soldIndex && boughtIndex && soldIndex === boughtIndex) {
+            reward += REWARD_BUY_THEN_SELL
+          }
+        }
+      }
+
+      // Track buy-then-sell state: was the last action a successful buy?
+      if (isBuy && actionExecuted && preBuyShopName) {
+        this.lastActionWasBuy = true
+        this.lastBoughtName = preBuyShopName
+      } else {
+        this.lastActionWasBuy = false
+        this.lastBoughtName = null
       }
 
       // Level-up reward: only when board is reasonably filled
@@ -727,8 +755,9 @@ export class TrainingEnv {
     })
     if (!targetId) return false
 
-    // Track stars for sell penalty reward
+    // Track stars and name for sell penalty / buy-then-sell detection
     this.lastSoldStars = targetPokemon.stars ?? 1
+    this.lastSoldName = targetPokemon.name
 
     player.board.delete(targetId)
     this.state.shop.releasePokemon(targetPokemon.name, player, this.state)
