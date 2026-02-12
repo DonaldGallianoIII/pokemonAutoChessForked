@@ -85,8 +85,19 @@ export const REWARD_PER_WIN = 0.75
 export const REWARD_PER_LOSS = -0.5
 export const REWARD_PER_DRAW = 0.0
 export const REWARD_PER_KILL = -2.0 // penalty when agent dies
-export const REWARD_PLACEMENT_SCALE = 2.0 // final reward = (9 - rank) * scale - offset
-export const REWARD_PLACEMENT_OFFSET = 6.0
+// Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
+// Steep curve: big rewards for winning, brutal penalties for losing.
+// 4th→5th is the cliff separating positive from negative.
+export const REWARD_PLACEMENT_TABLE: readonly number[] = [
+  +20.0, // 1st
+  +13.0, // 2nd
+   +8.0, // 3rd
+   +4.0, // 4th
+   -2.0, // 5th
+   -6.0, // 6th
+  -11.0, // 7th
+  -16.0, // 8th
+]
 
 // Shaped rewards (Phase 6)
 export const REWARD_INTEREST_BONUS = 0.05   // per interest gold earned (with board guard)
