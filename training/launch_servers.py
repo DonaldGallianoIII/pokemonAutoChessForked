@@ -24,6 +24,10 @@ import requests
 
 _IS_WINDOWS = sys.platform == "win32"
 
+# Module-level constants (also used by pac_env.py for server restarts)
+SERVER_CMD = "npx ts-node --transpile-only app/training/index.ts"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _kill_proc_tree(proc):
     """Kill a subprocess and all its children, cross-platform."""
@@ -62,9 +66,8 @@ def launch_servers(
     server_list: list of (subprocess.Popen, int) tuples — (process, port).
     cleanup_function: callable that terminates all servers.
     """
-    # Project root is one level up from training/
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    cmd = "npx ts-node --transpile-only app/training/index.ts"
+    project_root = PROJECT_ROOT
+    cmd = SERVER_CMD
 
     servers: list[tuple[subprocess.Popen, int]] = []
 
