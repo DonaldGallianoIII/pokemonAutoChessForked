@@ -124,6 +124,7 @@ export const REWARD_LEVEL_UP = 0.10
 // Reroll reward: unconditional small incentive to refresh shop
 // Teaches the agent that rerolling exists and is useful (find duplicates, upgrades, etc.)
 export const REWARD_REROLL = 0.03
+export const REWARD_REROLL_LATEGAME = 0.05   // after stage 20, stronger push to spend gold on rerolls
 
 // Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
 export const REWARD_KEEP_UNIQUE = 0.007
@@ -132,6 +133,38 @@ export const REWARD_KEEP_LEGENDARY = 0.007
 // Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
 export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
 export const REWARD_BUY_EVOLUTION = 0.20     // buying 3rd copy (triggers evolution)
+// Late-game boost: after stage 20, reward evolutions more to encourage spending gold
+export const REWARD_BUY_DUPLICATE_LATEGAME = 0.12   // buying 2nd copy (stage 20+)
+export const REWARD_BUY_EVOLUTION_LATEGAME = 0.30    // buying 3rd copy (stage 20+)
+
+// Gold hoarding penalty: applied per excess gold above threshold at end of each stage.
+// Interest caps at 50g held; early game allows saving for levels, late game punishes harder.
+//
+// Before stage 21:  >70g → -0.04/gold
+// After stage 21 (tiered):
+//   >50g → -0.01/gold,  >60g → -0.04/gold,  >70g → -0.07/gold
+export const GOLD_EXCESS_THRESHOLD = 70
+export const REWARD_GOLD_EXCESS_PENALTY = -0.04       // per gold above 70 (early game)
+export const GOLD_LATEGAME_STAGE = 21                  // stage at which stricter tiers kick in
+export const GOLD_LATEGAME_TIER1_THRESHOLD = 50        // >50g
+export const REWARD_GOLD_LATEGAME_TIER1 = -0.01        // per gold above 50
+export const GOLD_LATEGAME_TIER2_THRESHOLD = 60        // >60g
+export const REWARD_GOLD_LATEGAME_TIER2 = -0.04        // per gold above 60
+export const REWARD_GOLD_LATEGAME_TIER3 = -0.07        // per gold above 70
+
+// Low-gold penalty: teaches the agent to save toward interest thresholds.
+// Before stage 5: no penalty. Then the minimum gold target ramps up:
+//   stage 5+ → 10g,  stage 8+ → 20g,  stage 12+ → 30g,
+//   stage 15+ → 40g, stage 19+ → 50g
+// Penalty is per gold below the target for the current stage.
+export const GOLD_MIN_TARGETS: [number, number][] = [
+  [19, 50],  // stage 19+: save to 50g (full interest)
+  [15, 40],  // stage 15+: save to 40g
+  [12, 30],  // stage 12+: save to 30g
+  [8, 20],   // stage  8+: save to 20g
+  [5, 10],   // stage  5+: save to 10g
+]
+export const REWARD_GOLD_LOW_PENALTY = -0.01           // per gold below target
 
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
