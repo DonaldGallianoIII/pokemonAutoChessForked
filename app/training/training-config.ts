@@ -99,8 +99,13 @@ export const REWARD_PLACEMENT_TABLE: readonly number[] = [
   -23.0, // 8th
 ]
 
-// Shaped rewards (Phase 6) — unchanged signals
-export const REWARD_INTEREST_BONUS = 0.05   // per interest gold earned (with board guard)
+// Shaped rewards (Phase 6) — economy signals
+export const REWARD_INTEREST_BONUS = 0.12   // per interest gold earned (with board guard). Boosted from 0.05 to incentivize eco
+// Gold Standard: flat bonus each round the agent holds >= 50g at income time.
+// 50g is the eco breakpoint in auto chess (max 5 interest). Agent should reach 50g
+// and hold it as long as possible, only spending when gold pressure forces it (low HP).
+// Combined with interest: 5×0.12 + 0.30 = 0.90/round at 50g. Over 15 rounds = ~13.5 total.
+export const REWARD_GOLD_STANDARD = 0.30    // flat bonus per round when gold >= 50 (with board guard)
 export const REWARD_PER_ENEMY_KILL = 0.02   // per enemy unit killed in combat
 export const REWARD_HP_SCALE = 0.005        // HP preservation bonus on win
 export const REWARD_PER_SURVIVE_ROUND = 0.12 // bonus for every alive player each round

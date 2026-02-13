@@ -306,6 +306,10 @@ class GameMetrics:
         if late:
             result["bench_deadweight_late"] = sum(f.bench_dead_weight for f in late) / len(late)
 
+        # Rounds at 50g+ (gold standard eco metric)
+        rounds_50g = sum(1 for f in self.fights if f.gold >= 50)
+        result["rounds_at_50g"] = float(rounds_50g)
+
         # Total rolls (from cumulative counter on last fight)
         result["total_rolls_per_game"] = float(self._total_rerolls())
         result["rolls_after_stage_15"] = float(self._rerolls_after_stage(15))

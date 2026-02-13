@@ -95,6 +95,7 @@ import {
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
+  REWARD_GOLD_STANDARD,
   REWARD_INTEREST_BONUS,
   REWARD_SELL_EVOLVED,
   REWARD_BUY_THEN_SELL,
@@ -1541,6 +1542,16 @@ export class TrainingEnv {
             const r = player.interest * REWARD_INTEREST_BONUS
             rewards.set(player.id, (rewards.get(player.id) ?? 0) + r)
             if (player.id === this.agentId) this.trackReward("interestBonus", r)
+
+            // 6.1b: Gold Standard bonus — flat reward for holding >= 50g.
+            // player.interest is computed from pre-income money, so
+            // interest >= 5 (max) means the player had >= 50g before income.
+            // This creates a strong incentive to reach and maintain 50g.
+            if (player.interest >= 5) {
+              const gs = REWARD_GOLD_STANDARD
+              rewards.set(player.id, (rewards.get(player.id) ?? 0) + gs)
+              if (player.id === this.agentId) this.trackReward("goldStandard", gs)
+            }
           }
         }
       })
