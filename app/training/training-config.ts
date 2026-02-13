@@ -104,23 +104,24 @@ export const REWARD_PER_WIN = 0.75
 export const REWARD_PER_LOSS = -0.5
 export const REWARD_PER_DRAW = 0.0
 
-// ─── Stage-Scaled Battle Rewards (v1.4) ──────────────────────────────
-// Late-game wins are worth more to incentivize board investment.
-// Losses scale at half rate so the agent isn't over-punished for losing late.
-// Formula: reward × (1 + scaling). Win at stage 22 → 0.75 × 2.5 = 1.875.
+// ─── Stage-Scaled Battle Rewards (v1.6) ──────────────────────────────
+// v1.6: Early PVE wins heavily discounted (×0.25), late wins boosted (×3.0).
+// Old scaling gave full credit for beating Magikarp — free +3.75 in stages 1-5.
+// Now early wins total ~0.94 and late wins are the dominant battle signal.
+// Formula: reward × scaling. Win at stage 22 → 0.75 × 3.0 = 2.25.
 export const BATTLE_WIN_SCALING: Record<string, number> = {
-  STAGE_1_5:     0,     // ×1.0 (base)
-  STAGE_6_10:    0.25,  // ×1.25
-  STAGE_11_15:   0.5,   // ×1.5
-  STAGE_16_20:   1.0,   // ×2.0
-  STAGE_21_PLUS: 1.5    // ×2.5
+  STAGE_1_5:     -0.75, // ×0.25 (was ×1.0) — PVE freebies worth almost nothing
+  STAGE_6_10:    -0.50, // ×0.50 (was ×1.25)
+  STAGE_11_15:   0,     // ×1.0  (was ×1.5)
+  STAGE_16_20:   1.0,   // ×2.0  (unchanged)
+  STAGE_21_PLUS: 2.0    // ×3.0  (was ×2.5)
 }
 export const BATTLE_LOSS_SCALING: Record<string, number> = {
-  STAGE_1_5:     0,     // ×1.0 (base)
-  STAGE_6_10:    0.125, // ×1.125
-  STAGE_11_15:   0.25,  // ×1.25
-  STAGE_16_20:   0.5,   // ×1.5
-  STAGE_21_PLUS: 0.75   // ×1.75
+  STAGE_1_5:     -0.50, // ×0.50 (was ×1.0) — early losses less punishing
+  STAGE_6_10:    -0.25, // ×0.75 (was ×1.125)
+  STAGE_11_15:   0,     // ×1.0  (was ×1.25)
+  STAGE_16_20:   0.5,   // ×1.5  (unchanged)
+  STAGE_21_PLUS: 1.0    // ×2.0  (was ×1.75)
 }
 // Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
 // Steep curve: big rewards for winning, brutal penalties for losing.
