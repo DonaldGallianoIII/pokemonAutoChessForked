@@ -188,7 +188,7 @@ export const REWARD_GOLD_LOW_PENALTY = -0.01           // per gold below target
 // Critical HP gold penalty: when below this HP threshold, ALL held gold is punished.
 // "Spend or die" — sitting on gold at low HP is suicidal, force the agent to invest.
 export const GOLD_CRITICAL_HP_THRESHOLD = 20
-export const REWARD_GOLD_CRITICAL_HP = -1.0             // per gold held when HP < threshold
+export const REWARD_GOLD_CRITICAL_HP = -0.1             // per gold held when HP < threshold
 
 // Dead-weight bench penalty: when HP < 20, bench units not in the same evolution family
 // as any board unit are dead weight — sell them and spend the gold.
