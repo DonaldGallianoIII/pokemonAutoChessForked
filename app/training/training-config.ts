@@ -185,6 +185,11 @@ export const GOLD_MIN_TARGETS: [number, number][] = [
 ]
 export const REWARD_GOLD_LOW_PENALTY = -0.01           // per gold below target
 
+// Critical HP gold penalty: when below this HP threshold, ALL held gold is punished.
+// "Spend or die" — sitting on gold at low HP is suicidal, force the agent to invest.
+export const GOLD_CRITICAL_HP_THRESHOLD = 20
+export const REWARD_GOLD_CRITICAL_HP = -1.0             // per gold held when HP < threshold
+
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
 export const GRID_WIDTH = 8

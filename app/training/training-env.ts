@@ -79,6 +79,7 @@ import {
   GOLD_LATEGAME_STAGE,
   GOLD_LATEGAME_TIER1_THRESHOLD,
   GOLD_LATEGAME_TIER2_THRESHOLD,
+  GOLD_CRITICAL_HP_THRESHOLD,
   GOLD_MIN_TARGETS,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
@@ -89,6 +90,7 @@ import {
   REWARD_GOLD_LATEGAME_TIER1,
   REWARD_GOLD_LATEGAME_TIER2,
   REWARD_GOLD_LATEGAME_TIER3,
+  REWARD_GOLD_CRITICAL_HP,
   REWARD_GOLD_LOW_PENALTY,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
@@ -1367,6 +1369,15 @@ export class TrainingEnv {
         if (deficit > 0) {
           rewards.set(id, (rewards.get(id) ?? 0) + deficit * REWARD_GOLD_LOW_PENALTY)
         }
+      }
+    })
+
+    // 6.7: Critical HP gold penalty — when HP < 20, punish ALL held gold at -1.0/gold.
+    // "Spend or die": sitting on gold while about to be eliminated is suicidal.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      if (player.life > 0 && player.life < GOLD_CRITICAL_HP_THRESHOLD && player.money > 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + player.money * REWARD_GOLD_CRITICAL_HP)
       }
     })
 
