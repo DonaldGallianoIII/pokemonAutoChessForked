@@ -271,6 +271,22 @@ export const REWARD_REROLL_LATEGAME = 0.05   // after stage 20, stronger push to
 export const REROLL_BOOST_GOLD_THRESHOLD = 50 // gold level where reroll reward doubles
 export const REROLL_BOOST_LEVEL_THRESHOLD = 8 // player level where reroll reward doubles
 
+// ─── Reroll Below Economy Penalty (v1.5) ─────────────────────────────
+// Penalizes rerolling when gold < 50 (breaking interest tiers to fish for units).
+// Penalty = half the current interest reward signal per reroll.
+// Uses PRE-reroll money to compute interest (what you had before spending the 1g).
+// Example: at 30g (interest=3), penalty = -(3 × 0.12) / 2 = -0.18 per reroll.
+// DISABLED when gold pressure is active (non-SAFE tier) — if you're dying, spend freely.
+export const REROLL_ECO_PENALTY_DIVISOR = 2   // penalty = interestSignal / this value
+
+// ─── Empty Turn Penalty (v1.5) ───────────────────────────────────────
+// Penalizes hitting END_TURN as the very first action (0 productive actions).
+// Only fires past stage 15 AND when gold >= 50 — under 50g, re-ecoing is fine.
+// At 50g+ the agent has resources; doing nothing is coasting.
+export const REWARD_EMPTY_TURN_PENALTY = -0.15
+export const EMPTY_TURN_MIN_STAGE = 16        // "past stage 15" = stage 16+
+export const EMPTY_TURN_GOLD_FLOOR = 50       // only penalize when holding this much
+
 // ─── Evo-from-Reroll Bonus (v1.4) ───────────────────────────────────
 // Flat bonus when a reroll leads to buying an evolution (star-up).
 // Only fires if the agent's previous action was REFRESH and the current BUY triggers evo.

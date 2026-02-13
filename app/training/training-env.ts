@@ -123,7 +123,11 @@ import {
   TRAINING_MAX_FIGHT_STEPS,
   TRAINING_NUM_OPPONENTS,
   TRAINING_SIMULATION_DT,
-  TrainingAction
+  TrainingAction,
+  REROLL_ECO_PENALTY_DIVISOR,
+  REWARD_EMPTY_TURN_PENALTY,
+  EMPTY_TURN_MIN_STAGE,
+  EMPTY_TURN_GOLD_FLOOR
 } from "./training-config"
 import { BotV2, IBot } from "../models/mongo-models/bot-v2"
 import { CountEvolutionRule } from "../core/evolution-rules"
@@ -548,6 +552,31 @@ export class TrainingEnv {
         if (agent.money >= REROLL_BOOST_GOLD_THRESHOLD) r *= 2
         if (agent.experienceManager.level >= REROLL_BOOST_LEVEL_THRESHOLD) r *= 2
         reward += r; this.trackReward("reroll", r)
+
+        // v1.5: Reroll below economy penalty — rerolling under 50g breaks interest tiers.
+        // Penalty = half the interest reward signal computed from PRE-reroll money.
+        // Disabled when gold pressure is active (non-SAFE tier) — if dying, spending is correct.
+        if (agent.money < REROLL_BOOST_GOLD_THRESHOLD) {
+          const stage = this.state.stageLevel
+          let avgDamage: number
+          if (stage >= 23)      avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_23_PLUS
+          else if (stage >= 17) avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_17_22
+          else if (stage >= 11) avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_11_16
+          else if (stage >= 5)  avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_5_10
+          else                  avgDamage = Infinity // stages 1-4: always SAFE
+          const livesRemaining = Math.floor(agent.life / avgDamage)
+          const isGoldPressureActive = livesRemaining < 4 && stage >= 5
+
+          if (!isGoldPressureActive) {
+            const preRerollMoney = agent.money + 1 // reroll cost 1g already deducted
+            const currentInterest = Math.min(agent.maxInterest ?? 5, Math.floor(preRerollMoney / 10))
+            const interestSignal = currentInterest * REWARD_INTEREST_BONUS
+            const penalty = -(interestSignal / REROLL_ECO_PENALTY_DIVISOR)
+            if (penalty < 0) {
+              reward += penalty; this.trackReward("rerollBelowEco", penalty)
+            }
+          }
+        }
       }
 
       // NOTE: keepUniqueLegendary moved to per-round in runFightPhase() (was per-step,
@@ -585,6 +614,17 @@ export class TrainingEnv {
         this.actionsThisTurn >= TRAINING_MAX_ACTIONS_PER_TURN
 
       if (shouldEndTurn) {
+        // v1.5: Empty turn penalty — penalize immediate END_TURN with 0 productive actions.
+        // Only fires past stage 15 AND when gold >= 50 (under 50g, re-ecoing is legitimate).
+        if (
+          this.actionsThisTurn === 1 &&
+          this.state.stageLevel >= EMPTY_TURN_MIN_STAGE &&
+          agent.money >= EMPTY_TURN_GOLD_FLOOR
+        ) {
+          reward += REWARD_EMPTY_TURN_PENALTY
+          this.trackReward("emptyTurn", REWARD_EMPTY_TURN_PENALTY)
+        }
+
         // Safety: if propositions are still pending at turn end, auto-pick randomly
         if (agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0) {
           this.autoPickForAgent(agent)
