@@ -87,16 +87,17 @@ export const REWARD_PER_DRAW = 0.0
 export const REWARD_PER_KILL = -2.0 // penalty when agent dies
 // Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
 // Steep curve: big rewards for winning, brutal penalties for losing.
-// Only top-3 get positive reward; 4th is break-even, bottom-4 punished hard.
+// Only top-3 get positive reward; 4th is now punished (-3) to prevent coasting.
+// Bottom-4 shifted down by 3 accordingly. Total spread: 48 (25 to -23).
 export const REWARD_PLACEMENT_TABLE: readonly number[] = [
-  +20.0, // 1st
+  +25.0, // 1st
   +13.0, // 2nd
    +8.0, // 3rd
-    0.0, // 4th
-   -4.0, // 5th
-   -9.0, // 6th
-  -14.0, // 7th
-  -20.0, // 8th
+   -3.0, // 4th
+   -7.0, // 5th
+  -12.0, // 6th
+  -17.0, // 7th
+  -23.0, // 8th
 ]
 
 // Shaped rewards (Phase 6)
@@ -162,13 +163,13 @@ export const REWARD_BUY_EVOLUTION_LATEGAME = 0.30    // buying 3rd copy (stage 2
 // After stage 21 (tiered):
 //   >50g → -0.01/gold,  >60g → -0.04/gold,  >70g → -0.07/gold
 export const GOLD_EXCESS_THRESHOLD = 70
-export const REWARD_GOLD_EXCESS_PENALTY = -0.04       // per gold above 70 (early game)
+export const REWARD_GOLD_EXCESS_PENALTY = -0.08       // per gold above 70 (early game) — doubled, no reason to ever hold 70+
 export const GOLD_LATEGAME_STAGE = 21                  // stage at which stricter tiers kick in
 export const GOLD_LATEGAME_TIER1_THRESHOLD = 50        // >50g
 export const REWARD_GOLD_LATEGAME_TIER1 = -0.01        // per gold above 50
 export const GOLD_LATEGAME_TIER2_THRESHOLD = 60        // >60g
 export const REWARD_GOLD_LATEGAME_TIER2 = -0.04        // per gold above 60
-export const REWARD_GOLD_LATEGAME_TIER3 = -0.07        // per gold above 70
+export const REWARD_GOLD_LATEGAME_TIER3 = -0.14        // per gold above 70 — doubled, never acceptable
 
 // Low-gold penalty: teaches the agent to save toward interest thresholds.
 // Before stage 5: no penalty. Then the minimum gold target ramps up:
@@ -183,6 +184,15 @@ export const GOLD_MIN_TARGETS: [number, number][] = [
   [5, 10],   // stage  5+: save to 10g
 ]
 export const REWARD_GOLD_LOW_PENALTY = -0.01           // per gold below target
+
+// Critical HP gold penalty: when below this HP threshold, ALL held gold is punished.
+// "Spend or die" — sitting on gold at low HP is suicidal, force the agent to invest.
+export const GOLD_CRITICAL_HP_THRESHOLD = 20
+export const REWARD_GOLD_CRITICAL_HP = -1.0             // per gold held when HP < threshold
+
+// Dead-weight bench penalty: when HP < 20, bench units not in the same evolution family
+// as any board unit are dead weight — sell them and spend the gold.
+export const REWARD_BENCH_DEAD_WEIGHT = -1.0            // per non-matching bench unit when HP < threshold
 
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
