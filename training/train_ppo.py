@@ -224,6 +224,7 @@ def train(
     phase: str = "A",
     num_envs: int = 1,
     base_port: int = 9100,
+    num_agents: int = 1,
 ):
     """
     Train a MaskablePPO agent on Pokemon Auto Chess.
@@ -247,14 +248,35 @@ def train(
                When transitioning A→B, pass --resume with Phase A checkpoint.
         num_envs: Number of parallel environments (1 = single server, >1 = SubprocVecEnv)
         base_port: Base port for training servers (used when num_envs > 1)
+        num_agents: Number of RL agents per game (1=single, 2-7=hybrid, 8=full self-play).
+                    When >=2, uses SelfPlayVecEnv for multi-agent training.
     """
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    # Checkpoint prefix encodes phase + action space for rollback clarity.
-    checkpoint_prefix = f"phase{phase}_92act"
+    # Checkpoint prefix encodes phase + action space + agent count for rollback clarity.
+    # Examples: phaseA_92act_1rl (classic), phaseA_92act_2rl (hybrid), phaseB_92act_8rl (self-play)
+    checkpoint_prefix = f"phase{phase}_92act_{num_agents}rl"
 
-    if num_envs > 1:
+    if num_agents >= 2:
+        # ── Multi-agent mode: SelfPlayVecEnv (hybrid or full self-play) ──
+        # Each server hosts one game with N RL agents. The SelfPlayVecEnv
+        # auto-detects N from the server's /num-agents endpoint.
+        # Incompatible with --num-envs>1 (one server = one multi-agent game).
+        from selfplay_vec_env import SelfPlayVecEnv
+
+        if num_envs > 1:
+            print(
+                f"WARNING: --num-agents={num_agents} with --num-envs={num_envs} is not yet supported. "
+                "Using single server with SelfPlayVecEnv."
+            )
+
+        print(f"Using SelfPlayVecEnv with {num_agents} RL agents on port {base_port}")
+        wait_for_server(server_url)
+        benchmark_env(server_url)
+        env = SelfPlayVecEnv(server_url=server_url)
+    elif num_envs > 1:
+        # ── Parallel single-agent: SubprocVecEnv over multiple 1v7 servers ──
         from stable_baselines3.common.vec_env import SubprocVecEnv
 
         print(f"Using {num_envs} parallel environments on ports {base_port}-{base_port + num_envs - 1}")
@@ -283,6 +305,7 @@ def train(
             [make_parallel_env(base_port + i) for i in range(num_envs)]
         )
     else:
+        # ── Single-agent mode: 1 RL agent + 7 bots (classic Phase A) ──
         print(f"Using single environment on port {base_port}")
 
         # Wait for server
@@ -333,15 +356,24 @@ def train(
     # Save every 50k steps with a descriptive prefix for staged training.
     # When transitioning Phase A → B, you can roll back to a Phase A checkpoint
     # if self-play destabilizes.
+    # save_freq is in rollout calls. SB3 divides by num_envs internally,
+    # so we divide by the effective parallel count (agents or envs, whichever applies).
+    effective_envs = num_agents if num_agents >= 2 else num_envs
     checkpoint_cb = CheckpointCallback(
-        save_freq=max(1, 50_000 // num_envs),
+        save_freq=max(1, 50_000 // effective_envs),
         save_path=save_dir,
         name_prefix=checkpoint_prefix,
     )
     metrics_cb = TrainingMetricsCallback()
 
+    agent_mode = (
+        "single-agent (1 RL + 7 bots)" if num_agents == 1
+        else f"hybrid ({num_agents} RL + {8 - num_agents} bots)" if num_agents < 8
+        else "full self-play (8 RL)"
+    )
     print(f"\nStarting training for {total_timesteps} timesteps...")
     print(f"  Phase:          {phase} ({checkpoint_prefix})")
+    print(f"  Agent mode:     {agent_mode}")
     print(f"  Learning rate:  {learning_rate}")
     print(f"  Batch size:     {batch_size}")
     print(f"  N steps:        {n_steps}")
@@ -506,6 +538,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num-envs", type=int, default=1, help="Number of parallel environments")
     parser.add_argument("--base-port", type=int, default=9100, help="Base port for training servers")
+    parser.add_argument(
+        "--num-agents", type=int, default=1,
+        help="Number of RL agents per game (1=single-agent 1v7 [default], "
+             "2-7=hybrid NvBots, 8=full self-play). "
+             "Server must be started with matching NUM_RL_AGENTS or SELF_PLAY env var. "
+             "When >=2, uses SelfPlayVecEnv (multi-agent) instead of single-agent env. "
+             "Incompatible with --num-envs>1 (use one server for multi-agent)."
+    )
     parser.add_argument("--evaluate", default=None, help="Evaluate model at path instead of training")
     parser.add_argument("--eval-games", type=int, default=20, help="Number of evaluation games")
     parser.add_argument("--benchmark", action="store_true", help="Just run benchmark")
@@ -539,4 +579,5 @@ if __name__ == "__main__":
             phase=args.phase,
             num_envs=args.num_envs,
             base_port=args.base_port,
+            num_agents=args.num_agents,
         )

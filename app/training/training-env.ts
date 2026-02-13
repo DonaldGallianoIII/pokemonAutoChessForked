@@ -113,6 +113,7 @@ import {
   REWARD_PLACEMENT_TABLE,
   SYNERGY_ACTIVE_COUNT_BONUS,
   SYNERGY_DEPTH_BASE,
+  NUM_RL_AGENTS,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
@@ -266,7 +267,7 @@ export class TrainingEnv {
     this.playerIds = []
 
     if (SELF_PLAY) {
-      // Self-play: create 8 RL agent players (no bots)
+      // ── Full self-play: 8 RL agents, no bots (Phase B) ──────────────
       this.createSelfPlayAgents()
       this.agentId = this.playerIds[0] // backwards compat for getObservation etc.
 
@@ -279,8 +280,41 @@ export class TrainingEnv {
       this.state.players.forEach((player) => {
         this.state.shop.assignShop(player, false, this.state)
       })
+    } else if (NUM_RL_AGENTS > 1) {
+      // ── Hybrid mode: N RL agents + (8-N) bots ──────────────────────
+      // Agent sometimes fights itself, sometimes fights bots.
+      // Uses /step-multi endpoint (same as full self-play).
+      // To use: set NUM_RL_AGENTS=2 (or 3, 4, etc.) env var on the server.
+      //
+      // IMPORTANT: playerIds contains ONLY RL agent IDs (not bots).
+      // stepBatch() receives one action per RL agent. Bots don't take
+      // actions — they are auto-ended each round in resetTurnState().
+      this.createHybridAgents(NUM_RL_AGENTS)
+      this.agentId = this.playerIds[0] // backwards compat
+
+      // Create bot opponents to fill remaining seats
+      this.createBotPlayers()
+
+      // NOTE: Bot IDs are NOT added to playerIds. Only RL agents are
+      // tracked in playerIds so stepBatch() knows how many actions to expect.
+
+      // Assign shops for all RL agents
+      this.state.players.forEach((player) => {
+        if (!player.isBot) {
+          this.state.shop.assignShop(player, false, this.state)
+        }
+      })
+
+      // Stage 0: RL agents get propositions to choose via PICK; bots auto-pick
+      this.state.players.forEach((player) => {
+        if (!player.isBot) {
+          this.state.shop.assignUniquePropositions(player, this.state, [])
+        }
+      })
+      this.autoPickPropositionsForBots()
     } else {
-      // Single-agent mode: 1 RL agent + 7 bots (Phase A curriculum training)
+      // ── Single-agent mode: 1 RL agent + 7 bots (Phase A) ──────────
+      // This is the proven curriculum training mode. Unchanged.
       this.agentId = "rl-agent-" + nanoid(6)
       const agentPlayer = new Player(
         this.agentId,
@@ -2588,21 +2622,55 @@ export class TrainingEnv {
   /**
    * Reset turn-tracking state at the start of each pick phase.
    * Called after fights resolve and before the next round of actions.
+   *
+   * In hybrid mode (NUM_RL_AGENTS > 1 but < 8), bots are marked as
+   * already ended since they don't take actions via stepBatch().
+   * This ensures the allAliveEnded check triggers correctly when
+   * all RL agents have ended their turns.
    */
   private resetTurnState(): void {
     this.turnEnded.clear()
     this.actionsPerPlayer.clear()
-    this.state.players.forEach((_player, id) => {
-      this.turnEnded.set(id, false)
+    this.state.players.forEach((player, id) => {
+      // In hybrid mode, bots start with turnEnded=true (they don't take actions)
+      this.turnEnded.set(id, player.isBot)
       this.actionsPerPlayer.set(id, 0)
     })
   }
 
   /**
-   * Create 8 RL agent players for self-play mode (no bots).
+   * Create 8 RL agent players for full self-play mode (no bots).
    */
   private createSelfPlayAgents(): void {
     for (let i = 0; i < 8; i++) {
+      const playerId = `rl-agent-${i}-${nanoid(6)}`
+      const player = new Player(
+        playerId,
+        `RL-Agent-${i}`,
+        1000,
+        0,
+        getAvatarString(PkmIndex[Pkm.PIKACHU], false),
+        false, // isBot = false (RL agent)
+        i + 1,
+        new Map(),
+        "",
+        Role.BASIC,
+        this.state
+      )
+      this.state.players.set(playerId, player)
+      this.playerIds.push(playerId)
+    }
+  }
+
+  /**
+   * Create N RL agent players for hybrid mode (N agents + bots).
+   * Only the RL agent IDs are added to playerIds here — bot IDs are
+   * added later in reset() after createBotPlayers() runs.
+   * The stepBatch() method only processes actions for the first N
+   * entries in playerIds (the RL agents). Bots act autonomously.
+   */
+  private createHybridAgents(numAgents: number): void {
+    for (let i = 0; i < numAgents; i++) {
       const playerId = `rl-agent-${i}-${nanoid(6)}`
       const player = new Player(
         playerId,
@@ -2645,13 +2713,16 @@ export class TrainingEnv {
    * This prevents sb3 from trying to auto-reset individual sub-envs mid-game.
    */
   stepBatch(actions: number[]): StepResult[] {
-    if (!SELF_PLAY) {
-      throw new Error("stepBatch is only available in SELF_PLAY mode")
+    if (NUM_RL_AGENTS < 2) {
+      throw new Error(
+        "stepBatch requires NUM_RL_AGENTS >= 2 (hybrid or self-play mode). " +
+        "For single-agent mode (NUM_RL_AGENTS=1), use step() instead."
+      )
     }
 
     if (actions.length !== this.playerIds.length) {
       throw new Error(
-        `Expected ${this.playerIds.length} actions, got ${actions.length}`
+        `Expected ${this.playerIds.length} actions (one per RL agent), got ${actions.length}`
       )
     }
 
@@ -2829,9 +2900,10 @@ export class TrainingEnv {
         this.resetTurnState()
       }
     } else {
-      const allAliveEnded = this.playerIds.every((id) => {
-        const player = this.state.players.get(id)!
-        return !player.alive || this.turnEnded.get(id)
+      // Check ALL players (including bots in hybrid mode), not just playerIds.
+      // Bots are pre-marked as turnEnded=true in resetTurnState().
+      const allAliveEnded = values(this.state.players).every((player) => {
+        return !player.alive || this.turnEnded.get(player.id)
       })
 
       if (allAliveEnded) {

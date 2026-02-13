@@ -8,8 +8,27 @@ import { Pkm } from "../types/enum/Pokemon"
 import { Synergy, SynergyArray } from "../types/enum/Synergy"
 import { Weather } from "../types/enum/Weather"
 
-// Number of bot opponents in training games
-export const TRAINING_NUM_OPPONENTS = 7
+// Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
+// When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
+// Toggle via environment variable: SELF_PLAY=true
+export const SELF_PLAY = process.env.SELF_PLAY === "true"
+
+// Number of RL agents in the game. Controls training mode:
+//   1 (default) = single-agent mode: 1 RL agent + 7 bots, uses /step endpoint.
+//                 This is the proven Phase A curriculum training mode.
+//   2-7         = hybrid mode: N RL agents + (8-N) bots, uses /step-multi endpoint.
+//                 Agent sometimes fights itself. Good transition toward full self-play.
+//   8           = full self-play: 8 RL agents, no bots. Requires SELF_PLAY=true.
+//                 Uses /step-multi endpoint. This is Phase B.
+// Set via environment variable: NUM_RL_AGENTS=2
+// NOTE: When SELF_PLAY=true, this is forced to 8 regardless of env var.
+export const NUM_RL_AGENTS = SELF_PLAY
+  ? 8
+  : Math.max(1, Math.min(7, parseInt(process.env.NUM_RL_AGENTS ?? "1")))
+
+// Number of bot opponents = 8 minus RL agents (auto-computed).
+// When NUM_RL_AGENTS=1 → 7 bots (classic mode). When NUM_RL_AGENTS=2 → 6 bots. Etc.
+export const TRAINING_NUM_OPPONENTS = 8 - NUM_RL_AGENTS
 
 // Max actions the RL agent can take per PICK phase before auto-advancing
 // Reduced from 30 to 15: a productive turn rarely needs more than ~12 actions
@@ -195,11 +214,6 @@ export const UNIT_QUALITY_RARITY_DISCOUNT: Record<string, number> = {
   HATCH:     0.2,  // 80% of penalty
   SPECIAL:   0.4   // 60% of penalty
 }
-
-// Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
-// When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
-// Toggle via environment variable: SELF_PLAY=true
-export const SELF_PLAY = process.env.SELF_PLAY === "true"
 
 // HTTP server port for training API
 export const TRAINING_API_PORT = parseInt(process.env.TRAINING_PORT ?? "9100")

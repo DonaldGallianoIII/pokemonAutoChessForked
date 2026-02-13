@@ -1,27 +1,37 @@
 """
-SelfPlayVecEnv: A VecEnv wrapper for 8-player self-play PPO training.
+SelfPlayVecEnv: A VecEnv wrapper for multi-agent PPO training.
 
-Presents the 8-player Pokemon Auto Chess game as 8 parallel sub-environments
-to stable-baselines3. Each sub-env corresponds to one player seat.
+Presents N player seats in a Pokemon Auto Chess game as N parallel
+sub-environments to stable-baselines3. Supports two modes:
+
+  - Full self-play (SELF_PLAY=true, N=8): All 8 seats are RL agents.
+  - Hybrid mode (NUM_RL_AGENTS=2..7, N=2..7): N seats are RL agents,
+    the remaining (8-N) seats are bots controlled by the game server.
+    This is a transition step between single-agent (1v7) and full self-play.
+
+The number of RL agents (N) is queried from the server's /num-agents
+endpoint at startup. The wrapper sends N actions per step via /step-multi
+and receives N observations/rewards/dones back.
 
 Key design decisions (from design review):
 
 Issue #1 (fight trigger timing): The TS server tracks turnEnded[] state that
 persists across step calls within a round. The fight only triggers when the
-LAST alive player ends their turn. This wrapper doesn't need to handle this
-— it's all server-side.
+LAST alive player ends their turn. Bots in hybrid mode are auto-ended by
+the server. This wrapper doesn't need to handle this — it's all server-side.
 
 Issue #2 (reward attribution): The /step-multi endpoint returns rewards for
-ALL 8 players after each fight, not just the triggering player. The wrapper
+ALL N RL agents after each fight, not just the triggering player. The wrapper
 passes these through directly.
 
 Issue #3 (VecEnv reset semantics): Dead players return done=False with
 END_TURN-only action masks until the game actually ends. Only when the game
-ends do ALL 8 players return done=True simultaneously. This prevents sb3's
+ends do ALL N players return done=True simultaneously. This prevents sb3's
 VecEnv from trying to auto-reset individual sub-envs mid-game.
 
 Usage:
     env = SelfPlayVecEnv(server_url="http://localhost:9100")
+    # num_envs is auto-detected from server (8 for self-play, N for hybrid)
     obs = env.reset()
     obs, rewards, dones, infos = env.step(actions)
 """
@@ -50,18 +60,23 @@ def _port_from_url(url: str) -> str:
 
 class SelfPlayVecEnv(VecEnv):
     """
-    VecEnv wrapper for 8-player self-play.
+    VecEnv wrapper for multi-agent training (self-play or hybrid).
 
-    Each of the 8 sub-envs is one player seat in a shared Pokemon Auto Chess
+    Each of the N sub-envs is one RL-agent seat in a shared Pokemon Auto Chess
     game. Actions are batched into a single /step-multi HTTP call for efficiency
-    (one round-trip per step, not 8).
+    (one round-trip per step, not N).
+
+    N is auto-detected from the server's /num-agents endpoint:
+      - SELF_PLAY=true  → N=8 (full self-play, no bots)
+      - NUM_RL_AGENTS=2 → N=2 (hybrid: 2 RL agents + 6 bots)
+      - etc.
     """
 
     def __init__(self, server_url: str = "http://localhost:9100"):
         self.server_url = server_url.rstrip("/")
         self._port = _port_from_url(self.server_url)
 
-        # Query server for space dimensions
+        # Query server for space dimensions and number of RL agents
         try:
             action_info = requests.get(
                 f"{self.server_url}/action-space", timeout=HEALTH_TIMEOUT
@@ -69,14 +84,24 @@ class SelfPlayVecEnv(VecEnv):
             obs_info = requests.get(
                 f"{self.server_url}/observation-space", timeout=HEALTH_TIMEOUT
             ).json()
+            agents_info = requests.get(
+                f"{self.server_url}/num-agents", timeout=HEALTH_TIMEOUT
+            ).json()
         except requests.exceptions.ConnectionError:
             raise ConnectionError(
                 f"Could not connect to training server at {self.server_url}. "
-                "Make sure the server is running with SELF_PLAY=true"
+                "Make sure the server is running with SELF_PLAY=true or NUM_RL_AGENTS>=2"
             )
 
         self._num_actions = action_info["n"]
         self._obs_size = obs_info["n"]
+        self._num_agents = agents_info["n"]
+
+        print(
+            f"SelfPlayVecEnv: server on port {self._port} has "
+            f"{self._num_agents} RL agent(s)"
+            f"{' (hybrid mode with bots)' if self._num_agents < 8 else ' (full self-play)'}"
+        )
 
         observation_space = spaces.Box(
             low=-1.0, high=2.0, shape=(self._obs_size,), dtype=np.float32
@@ -84,16 +109,18 @@ class SelfPlayVecEnv(VecEnv):
         action_space = spaces.Discrete(self._num_actions)
 
         super().__init__(
-            num_envs=8,
+            num_envs=self._num_agents,
             observation_space=observation_space,
             action_space=action_space,
         )
 
-        self._action_masks = np.ones((8, self._num_actions), dtype=np.int8)
-        self._last_obs = np.zeros((8, self._obs_size), dtype=np.float32)
+        n = self._num_agents
+        self._action_masks = np.ones((n, self._num_actions), dtype=np.int8)
+        self._last_obs = np.zeros((n, self._obs_size), dtype=np.float32)
         self._pending_actions = None
 
     def reset(self) -> np.ndarray:
+        n = self._num_agents
         last_error = None
         for attempt in range(RESET_MAX_RETRIES):
             try:
@@ -103,19 +130,16 @@ class SelfPlayVecEnv(VecEnv):
                 obs = np.array(response["observation"], dtype=np.float32)
 
                 # After reset, the server returns a single observation (player 0's view).
-                # For self-play, we do a no-op step to get all 8 observations.
-                # But actually, at stage 0, all players have propositions, so we need
-                # the per-player observations from step-multi.
-                # For now, broadcast the initial obs to all 8 sub-envs.
+                # Broadcast the initial obs to all N sub-envs.
                 # The first step_wait() call will get proper per-player observations.
-                all_obs = np.tile(obs, (8, 1))
+                all_obs = np.tile(obs, (n, 1))
 
                 info = response.get("info", {})
                 mask = np.array(
                     info.get("actionMask", np.ones(self._num_actions)),
                     dtype=np.int8,
                 )
-                self._action_masks = np.tile(mask, (8, 1))
+                self._action_masks = np.tile(mask, (n, 1))
                 self._last_obs = all_obs
 
                 return all_obs
@@ -138,6 +162,7 @@ class SelfPlayVecEnv(VecEnv):
         self._pending_actions = actions
 
     def step_wait(self):
+        n = self._num_agents
         if self._pending_actions is None:
             raise RuntimeError("step_async must be called before step_wait")
 
@@ -153,13 +178,13 @@ class SelfPlayVecEnv(VecEnv):
                 f"{type(e).__name__}: {e}"
             )
             self._pending_actions = None
-            # Return terminal state for all 8 players — triggers auto-reset
+            # Return terminal state for all N agents — triggers auto-reset
             obs = self._last_obs
-            rewards = np.zeros(8, dtype=np.float32)
-            dones = np.array([True] * 8, dtype=bool)
+            rewards = np.zeros(n, dtype=np.float32)
+            dones = np.array([True] * n, dtype=bool)
             infos = [
                 {"action_masks": self._action_masks[i], "timeout": True}
-                for i in range(8)
+                for i in range(n)
             ]
             # Auto-reset since all dones are True (matches normal path below)
             obs = self.reset()
@@ -189,7 +214,7 @@ class SelfPlayVecEnv(VecEnv):
         return obs, rewards, dones, infos
 
     def action_masks(self) -> np.ndarray:
-        """Return current action masks for all 8 sub-envs. Shape: (8, num_actions)."""
+        """Return current action masks for all N sub-envs. Shape: (N, num_actions)."""
         return self._action_masks
 
     def close(self) -> None:

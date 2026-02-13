@@ -14,7 +14,7 @@
  */
 import express from "express"
 import { TrainingEnv, StepResult } from "./training-env"
-import { SELF_PLAY, TOTAL_ACTIONS, TOTAL_OBS_SIZE, TRAINING_API_PORT } from "./training-config"
+import { NUM_RL_AGENTS, SELF_PLAY, TOTAL_ACTIONS, TOTAL_OBS_SIZE, TRAINING_API_PORT } from "./training-config"
 import { logger } from "../utils/logger"
 
 export async function startTrainingServer() {
@@ -32,6 +32,12 @@ export async function startTrainingServer() {
 
   app.get("/action-space", (_req, res) => {
     res.json({ n: TOTAL_ACTIONS })
+  })
+
+  // Returns the number of RL agents this server expects per step-multi call.
+  // Python side queries this to set VecEnv num_envs correctly.
+  app.get("/num-agents", (_req, res) => {
+    res.json({ n: NUM_RL_AGENTS })
   })
 
   app.get("/observation-space", (_req, res) => {
@@ -112,13 +118,15 @@ export async function startTrainingServer() {
     }
   })
 
-  // Self-play batch step: process one action per player (8 actions in, 8 results out)
-  // Used by SelfPlayVecEnv when SELF_PLAY=true
+  // Batch step: process one action per RL agent.
+  // Used by SelfPlayVecEnv in both full self-play (8 agents) and hybrid mode (N agents + bots).
+  // Requires NUM_RL_AGENTS >= 2 (set SELF_PLAY=true for 8, or NUM_RL_AGENTS=N for hybrid).
   app.post("/step-multi", (req, res) => {
     try {
-      if (!SELF_PLAY) {
+      if (NUM_RL_AGENTS < 2) {
         res.status(400).json({
-          error: "step-multi is only available in SELF_PLAY mode. Set SELF_PLAY=true"
+          error: "step-multi requires NUM_RL_AGENTS >= 2. " +
+            "Set SELF_PLAY=true (8 agents) or NUM_RL_AGENTS=2..7 (hybrid mode)."
         })
         return
       }
@@ -127,9 +135,9 @@ export async function startTrainingServer() {
         return
       }
       const actions: number[] = req.body.actions
-      if (!Array.isArray(actions) || actions.length !== 8) {
+      if (!Array.isArray(actions) || actions.length !== NUM_RL_AGENTS) {
         res.status(400).json({
-          error: "Expected { actions: number[8] } — one action per player"
+          error: `Expected { actions: number[${NUM_RL_AGENTS}] } — one action per RL agent`
         })
         return
       }
@@ -194,11 +202,16 @@ export async function startTrainingServer() {
 
   app.listen(TRAINING_API_PORT, () => {
     logger.info(`Training server listening on port ${TRAINING_API_PORT}`)
-    logger.info(`  Mode: ${SELF_PLAY ? "SELF_PLAY (8 RL agents)" : "SINGLE_AGENT (1 RL + 7 bots)"}`)
+    const modeLabel = SELF_PLAY
+      ? "SELF_PLAY (8 RL agents)"
+      : NUM_RL_AGENTS > 1
+        ? `HYBRID (${NUM_RL_AGENTS} RL agents + ${8 - NUM_RL_AGENTS} bots)`
+        : "SINGLE_AGENT (1 RL + 7 bots)"
+    logger.info(`  Mode: ${modeLabel}`)
     logger.info(`  POST /reset          - Reset environment`)
     logger.info(`  POST /step           - Take action { action: 0-${TOTAL_ACTIONS - 1} }`)
-    if (SELF_PLAY) {
-      logger.info(`  POST /step-multi     - Batch step { actions: number[8] }`)
+    if (NUM_RL_AGENTS >= 2) {
+      logger.info(`  POST /step-multi     - Batch step { actions: number[${NUM_RL_AGENTS}] }`)
     }
     logger.info(`  GET  /observe        - Get current observation`)
     logger.info(`  POST /benchmark      - Run full game with random actions`)
