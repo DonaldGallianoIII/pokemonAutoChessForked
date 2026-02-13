@@ -573,7 +573,7 @@ export class TrainingEnv {
             const currentInterest = Math.min(agent.maxInterest ?? 5, Math.floor(preRerollMoney / 10))
             const interestSignal = currentInterest * REWARD_INTEREST_BONUS
             const rawPenalty = -(interestSignal / REROLL_ECO_PENALTY_DIVISOR)
-            const penalty = Math.min(rawPenalty, REROLL_ECO_PENALTY_FLOOR) // floor: never weaker than -0.06
+            const penalty = Math.max(rawPenalty, REROLL_ECO_PENALTY_FLOOR) // floor: never weaker than -0.06
             if (penalty < 0) {
               reward += penalty; this.trackReward("rerollBelowEco", penalty)
             }
