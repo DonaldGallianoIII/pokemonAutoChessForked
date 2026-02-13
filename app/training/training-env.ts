@@ -42,7 +42,7 @@ import {
   ItemComponentsNoFossilOrScarf,
   ItemComponentsNoScarf
 } from "../types/enum/Item"
-import { Pkm, PkmDuo, PkmDuos, PkmIndex, PkmProposition } from "../types/enum/Pokemon"
+import { Pkm, PkmDuo, PkmDuos, PkmFamily, PkmIndex, PkmProposition } from "../types/enum/Pokemon"
 import { SpecialGameRule } from "../types/enum/SpecialGameRule"
 import { Synergy, SynergyArray } from "../types/enum/Synergy"
 import { Weather } from "../types/enum/Weather"
@@ -81,6 +81,7 @@ import {
   GOLD_LATEGAME_TIER2_THRESHOLD,
   GOLD_CRITICAL_HP_THRESHOLD,
   GOLD_MIN_TARGETS,
+  REWARD_BENCH_DEAD_WEIGHT,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
   REWARD_BUY_DUPLICATE_LATEGAME,
@@ -1378,6 +1379,31 @@ export class TrainingEnv {
       if (!player.alive || player.isBot) return
       if (player.life > 0 && player.life < GOLD_CRITICAL_HP_THRESHOLD && player.money > 0) {
         rewards.set(id, (rewards.get(id) ?? 0) + player.money * REWARD_GOLD_CRITICAL_HP)
+      }
+    })
+
+    // 6.8: Dead-weight bench penalty — when HP < 20, penalize bench units that don't
+    // share an evolution family with any board unit. These are dead weight: sell them.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      if (player.life > 0 && player.life < GOLD_CRITICAL_HP_THRESHOLD) {
+        // Collect families of all board units (y > 0)
+        const boardFamilies = new Set<Pkm>()
+        player.board.forEach((p) => {
+          if (p.positionY > 0) {
+            boardFamilies.add(PkmFamily[p.name])
+          }
+        })
+        // Penalize each bench unit whose family isn't on the board
+        let deadWeight = 0
+        player.board.forEach((p) => {
+          if (p.positionY === 0 && !boardFamilies.has(PkmFamily[p.name])) {
+            deadWeight++
+          }
+        })
+        if (deadWeight > 0) {
+          rewards.set(id, (rewards.get(id) ?? 0) + deadWeight * REWARD_BENCH_DEAD_WEIGHT)
+        }
       }
     })
 
