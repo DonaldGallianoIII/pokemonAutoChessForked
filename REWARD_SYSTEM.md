@@ -677,3 +677,325 @@ At -0.01/unit, it takes 27 rounds × 3 units = -0.81 total game impact. Meanwhil
 
 ### 15.9 Disabled Reroll Reward Creates Dead Zone
 With `REWARD_REROLL = 0`, the only positive signal for rerolling is evo-from-reroll (which requires finding an evolution). Productive rerolls that find duplicates (2nd copies) give +0.08 via buy duplicate, but the reroll itself costs 1g (lost interest signal). The agent may under-reroll in spots where fishing for duplicates is correct play.
+
+---
+---
+
+# Part 2: Observation Space — What the Agent Can See
+
+> **Total observation vector: 612 floats**, all clamped to [0, 1].
+
+**Source files**:
+- Dimensions: `app/training/training-config.ts` (lines 48-72)
+- Construction: `app/training/training-env.ts` → `getObservation()` (lines 2136-2352)
+- Python consumer: `training/pac_env.py` (lines 150-153) — `Box(low=0, high=1, shape=(612,))`
+
+---
+
+## Observation Layout Summary
+
+| Section | Features | Slots | Total floats | Indices |
+|---------|----------|-------|-------------|---------|
+| Player Stats | 14 | 1 | **14** | 0-13 |
+| Shop | 9 per slot | 6 | **54** | 14-67 |
+| Board & Bench | 12 per cell | 32 | **384** | 68-451 |
+| Held Items | 1 per slot | 10 | **10** | 452-461 |
+| Synergies | 1 per type | 31 | **31** | 462-492 |
+| Game Info | 7 | 1 | **7** | 493-499 |
+| Opponents | 10 per opponent | 7 | **70** | 500-569 |
+| Propositions | 7 per slot | 6 | **42** | 570-611 |
+| **TOTAL** | | | **612** | 0-611 |
+
+---
+
+## Section 1: Player Stats (14 floats, indices 0-13)
+
+The agent's own state. All normalized to [0, 1].
+
+| # | Index | Feature | Raw range | Normalization | What it tells the agent |
+|---|-------|---------|-----------|---------------|------------------------|
+| 1 | 0 | Life (HP) | 0-100 | `life / 100` | How close to elimination. Drives gold pressure awareness |
+| 2 | 1 | Gold | 0-300+ | `money / 300` | Economy state. 50g = 0.167 in obs space |
+| 3 | 2 | Level | 1-9 | `level / 9` | Team size cap, shop pool access |
+| 4 | 3 | Streak | -20 to +20 | `(streak + 20) / 40` | Win/loss streak for income. 0.5 = neutral |
+| 5 | 4 | Interest | 0-5 | `interest / 5` | Current interest tier (proxy for gold bracket) |
+| 6 | 5 | Alive | 0 or 1 | Binary | Whether agent is still in the game |
+| 7 | 6 | Rank | 1-8 | `rank / 8` | Current standing among all players |
+| 8 | 7 | Board size | 0-9 | `boardSize / 9` | How many units are on the board (not bench) |
+| 9 | 8 | Exp needed | 0-32 | `expNeeded / 32` | XP to next level (decides if leveling is worth it) |
+| 10 | 9 | Free rerolls | 0-3 | `shopFreeRolls / 3` | Free shop refreshes available (from items/abilities) |
+| 11 | 10 | Reroll count | 0-50+ | `rerollCount / 50` | Cumulative rerolls this game (behavioral tracking) |
+| 12 | 11 | Shop locked | 0 or 1 | Binary | Whether shop is locked for next round |
+| 13 | 12 | Total money earned | 0-500+ | `totalMoneyEarned / 500` | Lifetime income (economy performance metric) |
+| 14 | 13 | Total damage dealt | 0-300+ | `totalDamageDealt / 300` | Lifetime player damage (combat performance metric) |
+
+### Blind spots in player stats
+
+- **No HP history**: Agent sees current HP but not HP trajectory (gaining/losing). It must infer trend from rank changes.
+- **Gold resolution at high values**: At 300g normalization, the difference between 50g (0.167) and 55g (0.183) is only 0.016 in obs space. The agent may struggle to distinguish the critical 50g threshold.
+- **No explicit "gold pressure tier"**: The agent must compute lives remaining from HP and stage internally. It has HP (index 0) and stage (index 493) but the mapping through avg damage tables is implicit.
+
+---
+
+## Section 2: Shop (54 floats, indices 14-67)
+
+6 shop slots × 9 features each.
+
+| # | Feature | Normalization | Notes |
+|---|---------|---------------|-------|
+| 1 | hasUnit | 0 or 1 | Whether slot contains a pokemon |
+| 2 | speciesIndex | `pkmIndex / NUM_PKM_SPECIES` | Unique species ID (hundreds of species, dense encoding) |
+| 3 | rarity | Lookup table (0.1-1.0) | COMMON=0.1, UNCOMMON=0.2, RARE=0.4, EPIC=0.6, ULTRA=0.8, UNIQUE=0.9, LEGENDARY=1.0, HATCH=0.3, SPECIAL=0.5 |
+| 4 | cost | `buyPrice / 20` | Gold cost to purchase (legendary can cost 20) |
+| 5 | type1 | `synergyIndex / NUM_SYNERGIES` | Primary type (synergy) |
+| 6 | type2 | `synergyIndex / NUM_SYNERGIES` | Secondary type (0 if none) |
+| 7 | type3 | `synergyIndex / NUM_SYNERGIES` | Tertiary type (0 if none) |
+| 8 | type4 | Always 0 | Reserved (stone types only appear during combat) |
+| 9 | isEvoPossible | 0 or 1 | **Critical signal**: 1 if agent already has 2+ copies (buying triggers evolution) |
+
+### What the agent CAN'T see about shop
+
+- **No unit stats** (ATK, HP, range) — only available for board units, not shop. Agent must learn species→stats mapping implicitly.
+- **No ability info** — abilities are invisible in the observation space entirely.
+- **No shop pool tracking** — agent doesn't know how many copies of a species remain in the shared pool.
+
+---
+
+## Section 3: Board & Bench Grid (384 floats, indices 68-451)
+
+32 cells (8 wide × 4 tall) × 12 features. The grid is:
+- **Row 0 (y=0)**: Bench (8 slots, cells 0-7)
+- **Rows 1-3 (y=1-3)**: Board (24 slots, cells 8-31)
+
+| # | Feature | Normalization | Notes |
+|---|---------|---------------|-------|
+| 1 | hasUnit | 0 or 1 | Whether a pokemon occupies this cell |
+| 2 | speciesIndex | `pkmIndex / NUM_PKM_SPECIES` | Species identity |
+| 3 | stars | `stars / 3` | Evolution level: 0.33=1★, 0.67=2★, 1.0=3★ |
+| 4 | rarity | Lookup (0.1-1.0) | Same rarity mapping as shop |
+| 5 | type1 | `synergyIndex / NUM_SYNERGIES` | Primary type |
+| 6 | type2 | `synergyIndex / NUM_SYNERGIES` | Secondary type |
+| 7 | type3 | `synergyIndex / NUM_SYNERGIES` | Tertiary type |
+| 8 | type4 | Always 0 | Reserved |
+| 9 | atk | `atk / 100` | Attack stat |
+| 10 | hp | `hp / 1000` | Health stat |
+| 11 | range | `range / 5` | Attack range |
+| 12 | numItems | `items.size / 3` | Number of equipped items (max 3) |
+
+### Board encoding details
+
+- **Positional encoding is implicit**: The cell position in the flat vector encodes x,y. Cell index = `y * 8 + x`. The agent knows where each unit is by its position in the 384-float block.
+- **Bench vs board**: Cells 0-7 (first 96 floats of this section) are bench. Cells 8-31 (remaining 288 floats) are board.
+- **Empty cells**: All 12 features = 0.
+
+### What the agent CAN'T see about its board
+
+- **No individual item identity on units** — only `numItems` (count). The agent knows a unit has 2 items but not which items.
+- **No ability info** — no special ability, cooldown, or spell power data.
+- **No def/speDef stats** — only ATK, HP, and range are provided.
+- **No status effects or combat state** — observation is PICK-phase only, no in-fight state.
+
+---
+
+## Section 4: Held Items (10 floats, indices 452-461)
+
+Up to 10 component items in the agent's inventory (not yet equipped). Each is an item index normalized by total item count.
+
+| # | Feature | Normalization | Notes |
+|---|---------|---------------|-------|
+| 1-10 | itemIndex | `(itemIndex + 1) / NUM_ITEMS` | 0 = empty slot, >0 = specific item ID |
+
+### What the agent CAN'T see about items
+
+- **No item names/properties** — only a normalized index. The agent must learn which index values correspond to which items.
+- **No recipe knowledge** — the agent can't see what combined items would result from combining two components. It must learn recipes through trial and error.
+- **No items on opponent units** — opponent observation has no item data at all.
+
+---
+
+## Section 5: Synergies (31 floats, indices 462-492)
+
+One float per synergy type (31 total, matching `SynergyArray`). Each value = `count / 10` where count is the number of units contributing to that synergy.
+
+| Feature | Normalization | Notes |
+|---------|---------------|-------|
+| Per synergy count | `count / 10` | 0 = inactive, 0.3 = 3 units contributing, 1.0 = 10+ units |
+
+**What this does NOT tell the agent**: Which breakpoints are hit. The agent sees "3 Water units" but must internally know whether Water's breakpoints are [2,4,6] or [3,6,9] to understand the significance.
+
+---
+
+## Section 6: Game Info (7 floats, indices 493-499)
+
+Global game state that doesn't belong to any player.
+
+| # | Index | Feature | Normalization | What it tells the agent |
+|---|-------|---------|---------------|------------------------|
+| 1 | 493 | Stage level | `stageLevel / 50` | Game progression (stage 25 = 0.50) |
+| 2 | 494 | Phase | `phase / 2` | PICK=0, FIGHT=0.5, TOWN=1.0 (agent only acts during PICK) |
+| 3 | 495 | Players alive | `playersAlive / 8` | Lobby attrition (5 alive = 0.625) |
+| 4 | 496 | Has propositions | 0 or 1 | Whether agent has pending pokemon/item picks |
+| 5 | 497 | Weather index | `weatherIndex / NUM_WEATHERS` | Current weather (affects combat) |
+| 6 | 498 | Is PVE | 0 or 1 | Whether current round is vs AI (PVE stage) |
+| 7 | 499 | Max team size | `maxTeamSize / 9` | Current board capacity (level-dependent) |
+
+---
+
+## Section 7: Opponents (70 floats, indices 500-569)
+
+7 opponent slots × 10 features. Only alive opponents are populated (dead opponents = all zeros). Opponents are ordered by their position in the player list (not by rank or threat level).
+
+| # | Feature | Normalization | What it tells the agent |
+|---|---------|---------------|------------------------|
+| 1 | Life | `life / 100` | Opponent HP — who's weak/strong |
+| 2 | Rank | `rank / 8` | Opponent standing |
+| 3 | Level | `level / 9` | Opponent's team size capacity |
+| 4 | Gold | `money / 300` | Opponent's economy (useful for predicting their power) |
+| 5 | Streak | `(streak + 20) / 40` | Win/loss streak |
+| 6 | Board size | `boardSize / 9` | How many units they have fielded |
+| 7 | Top synergy 1 index | `synergyIndex / NUM_SYNERGIES` | Their strongest synergy type |
+| 8 | Top synergy 1 count | `count / 10` | How deep in that synergy |
+| 9 | Top synergy 2 index | `synergyIndex / NUM_SYNERGIES` | Their second strongest synergy |
+| 10 | Top synergy 2 count | `count / 10` | How deep in second synergy |
+
+### What the agent CAN'T see about opponents
+
+- **No opponent board composition** — only aggregate stats (board size, top 2 synergies). Can't see individual units, stars, items, or positioning.
+- **No matchup prediction** — doesn't know who it will fight next.
+- **No opponent shop/bench** — completely hidden.
+- **Ordering is unstable** — opponents aren't sorted by rank/threat, so the same opponent might appear at different indices across steps.
+
+---
+
+## Section 8: Propositions (42 floats, indices 570-611)
+
+6 proposition slots × 7 features. Active during carousel/pick events (unique pokemon, legendary pokemon, item picks, additional picks).
+
+**Two modes**:
+
+### Pokemon propositions
+
+| # | Feature | Normalization | Notes |
+|---|---------|---------------|-------|
+| 1 | speciesIndex | `pkmIndex / NUM_PKM_SPECIES` | Which pokemon is offered |
+| 2 | rarity | Lookup (0.1-1.0) | Rarity tier |
+| 3 | type1 | `synergyIndex / NUM_SYNERGIES` | Primary type |
+| 4 | type2 | `synergyIndex / NUM_SYNERGIES` | Secondary type |
+| 5 | type3 | `synergyIndex / NUM_SYNERGIES` | Tertiary type |
+| 6 | type4 | Always 0 | Reserved |
+| 7 | itemIndex | `itemIndex / NUM_ITEMS` | Paired item (if any, else 0) |
+
+### Item-only propositions (PVE rewards, item carousel)
+
+| # | Feature | Normalization | Notes |
+|---|---------|---------------|-------|
+| 1-6 | All zero | 0 | No pokemon data |
+| 7 | itemIndex | `itemIndex / NUM_ITEMS` | Item being offered |
+
+---
+
+## Action Space (92 discrete actions)
+
+The agent selects one action per step from 92 possible actions. Invalid actions are masked out.
+
+| Action range | Count | Description |
+|-------------|-------|-------------|
+| 0-5 | 6 | **BUY** shop slot 0-5 |
+| 6 | 1 | **REFRESH** (reroll shop, costs 1g or free) |
+| 7 | 1 | **LEVEL UP** (buy 4 XP for 4g) |
+| 8 | 1 | **LOCK SHOP** (toggle shop lock for next round) |
+| 9 | 1 | **END TURN** (finish PICK phase, start fight) |
+| 10-41 | 32 | **MOVE** first-available unit to cell 0-31 |
+| 42-73 | 32 | **SELL** unit at cell 0-31 |
+| 74-79 | 6 | **REMOVE SHOP** slot 0-5 (discard without buying) |
+| 80-85 | 6 | **PICK** proposition 0-5 (carousel/unique/item picks) |
+| 86-91 | 6 | **COMBINE** item pair 0-5 (craft combined item) |
+
+### Action masking rules
+
+The action mask (92-element binary vector) tells the agent which actions are legal. Key rules:
+
+| Action | Valid when |
+|--------|----------|
+| BUY_i | Shop slot i has a unit AND agent has enough gold AND bench has free space |
+| REFRESH | Agent has >= 1g (or free rerolls available) |
+| LEVEL_UP | Agent has >= 4g AND can level up (not max level) |
+| LOCK_SHOP | Not already used this turn (one lock toggle per turn) |
+| END_TURN | Always valid during PICK phase |
+| MOVE_cell | Cell is empty AND a moveable unit exists AND (bench→board: board not full) AND cell is not the anti-oscillation blocked cell |
+| SELL_cell | Cell has a unit |
+| REMOVE_SHOP_i | Shop slot i has a unit AND agent has enough gold (gold is gate) |
+| PICK_i | Proposition i exists AND (bench has space OR unit would evolve) |
+| COMBINE_p | Item pair p exists AND forms a valid recipe |
+
+**Anti-oscillation**: After 2+ consecutive moves, the last move's source cell is blocked as a move target. This prevents A→B→A loops.
+
+**Proposition lock**: When pokemon or item propositions are pending, ONLY PICK actions are valid (all other actions masked). The agent must pick before doing anything else.
+
+### Actions per turn budget
+
+`TRAINING_MAX_ACTIONS_PER_TURN = 15` — after 15 actions, the turn auto-ends. A typical productive turn uses ~8-12 actions (buy ×3, move ×3, reroll ×2, level, end_turn).
+
+---
+
+## Info Dict (Metadata, not part of observation)
+
+The `info` dict returned with each step contains debugging/logging data. The Python side uses it for metrics but **it is NOT part of the observation vector** the policy network sees.
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| stage | int | Current stage number |
+| phase | string | "PICK", "FIGHT", or "TOWN" |
+| rank | int | Current placement |
+| life | int | Current HP |
+| money | int | Current gold |
+| actionsThisTurn | int | Actions taken so far this turn |
+| actionMask | int[92] | Valid action mask (also read via `env.action_masks()`) |
+| gold | int | Alias for money |
+| boardSize | int | Units on board |
+| synergyCount | int | Number of active synergies |
+| itemsHeld | int | Items in inventory |
+| level | int | Player level |
+| maxTeamSize | int | Max board capacity |
+| exp / expNeeded | int | XP progress |
+| shop | string[] | Shop slot names (for replay) |
+| board | object[] | Board unit details (for replay) |
+| bench | object[] | Bench unit details (for replay) |
+| synergies | object[] | Active synergy details (for replay) |
+| items | string[] | Held item names (for replay) |
+| opponent | object | Last opponent fought (for replay) |
+| rewardBreakdown | Record | Cumulative named reward signals (full game) |
+| benchDeadWeightCount | int | Dead-weight bench units count |
+| buyCount | int | Cumulative buys this game |
+| sellCount | int | Cumulative sells this game |
+| rerollCount | int | Cumulative rerolls this game |
+| goldSpent | int | Cumulative gold spent this game |
+
+---
+
+## Complete Blind Spot Summary
+
+Things the agent **cannot see** that a human player can:
+
+| Blind spot | Impact | Could it be added? |
+|-----------|--------|-------------------|
+| Individual items on units (only count) | Can't plan item synergies/builds | Yes — would add 3 floats × 32 cells = 96 features |
+| Unit abilities/spells | Can't evaluate unit power properly | Hard — hundreds of abilities, would massively expand obs |
+| Defensive stats (def, speDef) | Missing 2/4 combat stats | Yes — add 2 floats × 32 cells = 64 features |
+| Opponent board composition | Can't counter-build or predict matchups | Yes but expensive — 7 × 24 cells × features |
+| Shop pool state | Can't calculate evolution odds | Yes — add remaining-copies-per-species array |
+| Item recipes | Must learn by trial and error | Could add recipe lookup features |
+| Next opponent | Can't position for specific matchup | Yes — add 1 float for next opponent index |
+| Combat results per unit | Can't evaluate which units performed well | Would require fight-phase observations |
+| Opponent items | Can't see what items enemies have | Yes but expensive |
+| Ability cooldowns/mana | No visibility into spell power or usage | Would need per-unit mana features |
+
+### Observation size impact of adding blind spots
+
+| Addition | Extra floats | New total | % increase |
+|----------|-------------|-----------|------------|
+| Item IDs on units (3 per cell) | +96 | 708 | +16% |
+| Def + SpeDef on units | +64 | 676 | +10% |
+| Next opponent ID | +1 | 613 | +0.2% |
+| Opponent boards (simplified) | +504 | 1116 | +82% |
+| Shop pool remaining | ~200 | 812 | +33% |
