@@ -1373,7 +1373,7 @@ export class TrainingEnv {
       }
     })
 
-    // 6.7: Critical HP gold penalty — when HP < 20, punish ALL held gold at -1.0/gold.
+    // 6.7: Critical HP gold penalty — when HP < 20, punish ALL held gold at -0.1/gold.
     // "Spend or die": sitting on gold while about to be eliminated is suicidal.
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
