@@ -91,7 +91,9 @@ import {
   REWARD_BUY_DUPLICATE_LATEGAME,
   REWARD_BUY_EVOLUTION,
   REWARD_BUY_EVOLUTION_LATEGAME,
-  REWARD_LEVEL_UP,
+  LEVEL_UP_RICH_THRESHOLD,
+  REWARD_LEVEL_UP_PENALTY,
+  REWARD_LEVEL_UP_STAGE9_TO5,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
   REWARD_REROLL_LATEGAME,
@@ -108,11 +110,11 @@ import {
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
   REWARD_PER_LOSS,
-  REWARD_PER_SURVIVE_ROUND,
   REWARD_PER_WIN,
   REWARD_PLACEMENT_TABLE,
   SYNERGY_ACTIVE_COUNT_BONUS,
   SYNERGY_DEPTH_BASE,
+  NUM_RL_AGENTS,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
@@ -121,7 +123,12 @@ import {
   TRAINING_MAX_FIGHT_STEPS,
   TRAINING_NUM_OPPONENTS,
   TRAINING_SIMULATION_DT,
-  TrainingAction
+  TrainingAction,
+  REROLL_ECO_PENALTY_DIVISOR,
+  REROLL_ECO_PENALTY_FLOOR,
+  REWARD_EMPTY_TURN_PENALTY,
+  EMPTY_TURN_MIN_STAGE,
+  EMPTY_TURN_GOLD_FLOOR
 } from "./training-config"
 import { BotV2, IBot } from "../models/mongo-models/bot-v2"
 import { CountEvolutionRule } from "../core/evolution-rules"
@@ -266,7 +273,7 @@ export class TrainingEnv {
     this.playerIds = []
 
     if (SELF_PLAY) {
-      // Self-play: create 8 RL agent players (no bots)
+      // ── Full self-play: 8 RL agents, no bots (Phase B) ──────────────
       this.createSelfPlayAgents()
       this.agentId = this.playerIds[0] // backwards compat for getObservation etc.
 
@@ -279,8 +286,41 @@ export class TrainingEnv {
       this.state.players.forEach((player) => {
         this.state.shop.assignShop(player, false, this.state)
       })
+    } else if (NUM_RL_AGENTS > 1) {
+      // ── Hybrid mode: N RL agents + (8-N) bots ──────────────────────
+      // Agent sometimes fights itself, sometimes fights bots.
+      // Uses /step-multi endpoint (same as full self-play).
+      // To use: set NUM_RL_AGENTS=2 (or 3, 4, etc.) env var on the server.
+      //
+      // IMPORTANT: playerIds contains ONLY RL agent IDs (not bots).
+      // stepBatch() receives one action per RL agent. Bots don't take
+      // actions — they are auto-ended each round in resetTurnState().
+      this.createHybridAgents(NUM_RL_AGENTS)
+      this.agentId = this.playerIds[0] // backwards compat
+
+      // Create bot opponents to fill remaining seats
+      this.createBotPlayers()
+
+      // NOTE: Bot IDs are NOT added to playerIds. Only RL agents are
+      // tracked in playerIds so stepBatch() knows how many actions to expect.
+
+      // Assign shops for all RL agents
+      this.state.players.forEach((player) => {
+        if (!player.isBot) {
+          this.state.shop.assignShop(player, false, this.state)
+        }
+      })
+
+      // Stage 0: RL agents get propositions to choose via PICK; bots auto-pick
+      this.state.players.forEach((player) => {
+        if (!player.isBot) {
+          this.state.shop.assignUniquePropositions(player, this.state, [])
+        }
+      })
+      this.autoPickPropositionsForBots()
     } else {
-      // Single-agent mode: 1 RL agent + 7 bots (Phase A curriculum training)
+      // ── Single-agent mode: 1 RL agent + 7 bots (Phase A) ──────────
+      // This is the proven curriculum training mode. Unchanged.
       this.agentId = "rl-agent-" + nanoid(6)
       const agentPlayer = new Player(
         this.agentId,
@@ -482,14 +522,24 @@ export class TrainingEnv {
       // Used for evo-from-reroll detection on the next BUY action.
       this.lastActionWasRefresh = (action === TrainingAction.REFRESH && actionExecuted)
 
-      // Level-up reward: only when board is reasonably filled
+      // Level-up reward v2: economy-first. Leveling is penalized by default.
+      // Exception 1: leveling to exactly level 5 at stage 9 (PVE Gyarados).
+      // Exception 2: "rich leveling" — gold >= 50 AFTER the buy (no eco damage).
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
-        const maxTeamSize = getMaxTeamSize(
-          agent.experienceManager.level,
-          this.state.specialGameRule
-        )
-        if (agent.boardSize >= maxTeamSize - 2) {
-          reward += REWARD_LEVEL_UP; this.trackReward("levelUp", REWARD_LEVEL_UP)
+        const newLevel = agent.experienceManager.level
+        const goldAfter = agent.money // gold after the 4g was spent
+
+        if (newLevel === 5 && this.state.stageLevel === 9) {
+          // Stage 9 PVE window: the ONE acceptable time to break eco for level 5
+          reward += REWARD_LEVEL_UP_STAGE9_TO5
+          this.trackReward("levelUp_stage9", REWARD_LEVEL_UP_STAGE9_TO5)
+        } else if (goldAfter >= LEVEL_UP_RICH_THRESHOLD) {
+          // Rich leveling: still at max interest, no eco damage. Neutral (0).
+          this.trackReward("levelUp_rich", 0)
+        } else {
+          // Economy-breaking level-up: penalize
+          reward += REWARD_LEVEL_UP_PENALTY
+          this.trackReward("levelUp_penalty", REWARD_LEVEL_UP_PENALTY)
         }
       }
 
@@ -503,18 +553,36 @@ export class TrainingEnv {
         if (agent.money >= REROLL_BOOST_GOLD_THRESHOLD) r *= 2
         if (agent.experienceManager.level >= REROLL_BOOST_LEVEL_THRESHOLD) r *= 2
         reward += r; this.trackReward("reroll", r)
+
+        // v1.5: Reroll below economy penalty — rerolling under 50g breaks interest tiers.
+        // Penalty = half the interest reward signal computed from PRE-reroll money.
+        // Disabled when gold pressure is active (non-SAFE tier) — if dying, spending is correct.
+        if (agent.money < REROLL_BOOST_GOLD_THRESHOLD) {
+          const stage = this.state.stageLevel
+          let avgDamage: number
+          if (stage >= 23)      avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_23_PLUS
+          else if (stage >= 17) avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_17_22
+          else if (stage >= 11) avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_11_16
+          else if (stage >= 5)  avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_5_10
+          else                  avgDamage = Infinity // stages 1-4: always SAFE
+          const livesRemaining = Math.floor(agent.life / avgDamage)
+          const isGoldPressureActive = livesRemaining < 4 && stage >= 5
+
+          if (!isGoldPressureActive) {
+            const preRerollMoney = agent.money + 1 // reroll cost 1g already deducted
+            const currentInterest = Math.min(agent.maxInterest ?? 5, Math.floor(preRerollMoney / 10))
+            const interestSignal = currentInterest * REWARD_INTEREST_BONUS
+            const rawPenalty = -(interestSignal / REROLL_ECO_PENALTY_DIVISOR)
+            const penalty = Math.min(rawPenalty, REROLL_ECO_PENALTY_FLOOR) // floor: never weaker than -0.06
+            if (penalty < 0) {
+              reward += penalty; this.trackReward("rerollBelowEco", penalty)
+            }
+          }
+        }
       }
 
-      // Per-step bonus for keeping unique/legendary units on board
-      let keepBonus = 0
-      agent.board.forEach((pokemon) => {
-        if (pokemon.positionY > 0) {
-          const rarity = getPokemonData(pokemon.name).rarity
-          if (rarity === Rarity.UNIQUE) { reward += REWARD_KEEP_UNIQUE; keepBonus += REWARD_KEEP_UNIQUE }
-          else if (rarity === Rarity.LEGENDARY) { reward += REWARD_KEEP_LEGENDARY; keepBonus += REWARD_KEEP_LEGENDARY }
-        }
-      })
-      if (keepBonus !== 0) this.trackReward("keepUniqueLegendary", keepBonus)
+      // NOTE: keepUniqueLegendary moved to per-round in runFightPhase() (was per-step,
+      // accumulating 2-4 reward per game from firing every action).
 
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
@@ -548,6 +616,17 @@ export class TrainingEnv {
         this.actionsThisTurn >= TRAINING_MAX_ACTIONS_PER_TURN
 
       if (shouldEndTurn) {
+        // v1.5: Empty turn penalty — penalize immediate END_TURN with 0 productive actions.
+        // Only fires past stage 15 AND when gold >= 50 (under 50g, re-ecoing is legitimate).
+        if (
+          this.actionsThisTurn === 1 &&
+          this.state.stageLevel >= EMPTY_TURN_MIN_STAGE &&
+          agent.money >= EMPTY_TURN_GOLD_FLOOR
+        ) {
+          reward += REWARD_EMPTY_TURN_PENALTY
+          this.trackReward("emptyTurn", REWARD_EMPTY_TURN_PENALTY)
+        }
+
         // Safety: if propositions are still pending at turn end, auto-pick randomly
         if (agent.pokemonsProposition.length > 0 || agent.itemsProposition.length > 0) {
           this.autoPickForAgent(agent)
@@ -1347,12 +1426,8 @@ export class TrainingEnv {
       }
     })
 
-    // Survival bonus: every alive player gets a flat bonus each round
-    this.state.players.forEach((player, id) => {
-      if (!player.alive) return
-      rewards.set(id, (rewards.get(id) ?? 0) + REWARD_PER_SURVIVE_ROUND)
-      if (id === this.agentId) this.trackReward("survivalBonus", REWARD_PER_SURVIVE_ROUND)
-    })
+    // NOTE: REWARD_PER_SURVIVE_ROUND removed — was +0.12/round free reward that
+    // rewarded coasting. Placement table is the sole signal for survival value.
 
     // ── Shaped rewards (Phase 6, v1.2 rework) ────────────────────────
 
@@ -1393,6 +1468,24 @@ export class TrainingEnv {
         const r = kills * REWARD_PER_ENEMY_KILL
         rewards.set(id, (rewards.get(id) ?? 0) + r)
         if (id === this.agentId) this.trackReward("enemyKills", r)
+      }
+    })
+
+    // 6.3b: Keep unique/legendary bonus — per-round (not per-step).
+    // Incentivizes holding high-value units on the board, fired once per fight.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      let keepBonus = 0
+      player.board.forEach((pokemon) => {
+        if (pokemon.positionY > 0) {
+          const rarity = getPokemonData(pokemon.name).rarity
+          if (rarity === Rarity.UNIQUE) keepBonus += REWARD_KEEP_UNIQUE
+          else if (rarity === Rarity.LEGENDARY) keepBonus += REWARD_KEEP_LEGENDARY
+        }
+      })
+      if (keepBonus > 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + keepBonus)
+        if (id === this.agentId) this.trackReward("keepUniqueLegendary", keepBonus)
       }
     })
 
@@ -2588,21 +2681,55 @@ export class TrainingEnv {
   /**
    * Reset turn-tracking state at the start of each pick phase.
    * Called after fights resolve and before the next round of actions.
+   *
+   * In hybrid mode (NUM_RL_AGENTS > 1 but < 8), bots are marked as
+   * already ended since they don't take actions via stepBatch().
+   * This ensures the allAliveEnded check triggers correctly when
+   * all RL agents have ended their turns.
    */
   private resetTurnState(): void {
     this.turnEnded.clear()
     this.actionsPerPlayer.clear()
-    this.state.players.forEach((_player, id) => {
-      this.turnEnded.set(id, false)
+    this.state.players.forEach((player, id) => {
+      // In hybrid mode, bots start with turnEnded=true (they don't take actions)
+      this.turnEnded.set(id, player.isBot)
       this.actionsPerPlayer.set(id, 0)
     })
   }
 
   /**
-   * Create 8 RL agent players for self-play mode (no bots).
+   * Create 8 RL agent players for full self-play mode (no bots).
    */
   private createSelfPlayAgents(): void {
     for (let i = 0; i < 8; i++) {
+      const playerId = `rl-agent-${i}-${nanoid(6)}`
+      const player = new Player(
+        playerId,
+        `RL-Agent-${i}`,
+        1000,
+        0,
+        getAvatarString(PkmIndex[Pkm.PIKACHU], false),
+        false, // isBot = false (RL agent)
+        i + 1,
+        new Map(),
+        "",
+        Role.BASIC,
+        this.state
+      )
+      this.state.players.set(playerId, player)
+      this.playerIds.push(playerId)
+    }
+  }
+
+  /**
+   * Create N RL agent players for hybrid mode (N agents + bots).
+   * Only the RL agent IDs are added to playerIds here — bot IDs are
+   * added later in reset() after createBotPlayers() runs.
+   * The stepBatch() method only processes actions for the first N
+   * entries in playerIds (the RL agents). Bots act autonomously.
+   */
+  private createHybridAgents(numAgents: number): void {
+    for (let i = 0; i < numAgents; i++) {
       const playerId = `rl-agent-${i}-${nanoid(6)}`
       const player = new Player(
         playerId,
@@ -2645,13 +2772,16 @@ export class TrainingEnv {
    * This prevents sb3 from trying to auto-reset individual sub-envs mid-game.
    */
   stepBatch(actions: number[]): StepResult[] {
-    if (!SELF_PLAY) {
-      throw new Error("stepBatch is only available in SELF_PLAY mode")
+    if (NUM_RL_AGENTS < 2) {
+      throw new Error(
+        "stepBatch requires NUM_RL_AGENTS >= 2 (hybrid or self-play mode). " +
+        "For single-agent mode (NUM_RL_AGENTS=1), use step() instead."
+      )
     }
 
     if (actions.length !== this.playerIds.length) {
       throw new Error(
-        `Expected ${this.playerIds.length} actions, got ${actions.length}`
+        `Expected ${this.playerIds.length} actions (one per RL agent), got ${actions.length}`
       )
     }
 
@@ -2753,6 +2883,22 @@ export class TrainingEnv {
         dupBuyRewards.set(playerId, prev + (lateGameBatch ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE))
       }
 
+      // Level-up reward v2: economy-first (same logic as single-agent path)
+      if (action === TrainingAction.LEVEL_UP && actionExecutedBatch) {
+        const newLevel = player.experienceManager.level
+        const goldAfter = player.money
+        let levelReward = 0
+        if (newLevel === 5 && this.state.stageLevel === 9) {
+          levelReward = REWARD_LEVEL_UP_STAGE9_TO5
+        } else if (goldAfter < LEVEL_UP_RICH_THRESHOLD) {
+          levelReward = REWARD_LEVEL_UP_PENALTY
+        }
+        if (levelReward !== 0) {
+          const prev = dupBuyRewards.get(playerId) ?? 0
+          dupBuyRewards.set(playerId, prev + levelReward)
+        }
+      }
+
       const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
       this.actionsPerPlayer.set(playerId, actCount)
 
@@ -2829,9 +2975,10 @@ export class TrainingEnv {
         this.resetTurnState()
       }
     } else {
-      const allAliveEnded = this.playerIds.every((id) => {
-        const player = this.state.players.get(id)!
-        return !player.alive || this.turnEnded.get(id)
+      // Check ALL players (including bots in hybrid mode), not just playerIds.
+      // Bots are pre-marked as turnEnded=true in resetTurnState().
+      const allAliveEnded = values(this.state.players).every((player) => {
+        return !player.alive || this.turnEnded.get(player.id)
       })
 
       if (allAliveEnded) {

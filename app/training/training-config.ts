@@ -8,8 +8,27 @@ import { Pkm } from "../types/enum/Pokemon"
 import { Synergy, SynergyArray } from "../types/enum/Synergy"
 import { Weather } from "../types/enum/Weather"
 
-// Number of bot opponents in training games
-export const TRAINING_NUM_OPPONENTS = 7
+// Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
+// When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
+// Toggle via environment variable: SELF_PLAY=true
+export const SELF_PLAY = process.env.SELF_PLAY === "true"
+
+// Number of RL agents in the game. Controls training mode:
+//   1 (default) = single-agent mode: 1 RL agent + 7 bots, uses /step endpoint.
+//                 This is the proven Phase A curriculum training mode.
+//   2-7         = hybrid mode: N RL agents + (8-N) bots, uses /step-multi endpoint.
+//                 Agent sometimes fights itself. Good transition toward full self-play.
+//   8           = full self-play: 8 RL agents, no bots. Requires SELF_PLAY=true.
+//                 Uses /step-multi endpoint. This is Phase B.
+// Set via environment variable: NUM_RL_AGENTS=2
+// NOTE: When SELF_PLAY=true, this is forced to 8 regardless of env var.
+export const NUM_RL_AGENTS = SELF_PLAY
+  ? 8
+  : Math.max(1, Math.min(7, parseInt(process.env.NUM_RL_AGENTS ?? "1")))
+
+// Number of bot opponents = 8 minus RL agents (auto-computed).
+// When NUM_RL_AGENTS=1 → 7 bots (classic mode). When NUM_RL_AGENTS=2 → 6 bots. Etc.
+export const TRAINING_NUM_OPPONENTS = 8 - NUM_RL_AGENTS
 
 // Max actions the RL agent can take per PICK phase before auto-advancing
 // Reduced from 30 to 15: a productive turn rarely needs more than ~12 actions
@@ -127,12 +146,17 @@ export const REWARD_INTEREST_BONUS = 0.12   // per interest gold earned (with bo
 export const REWARD_GOLD_STANDARD = 0.30    // flat bonus per round when gold >= 50 (with board guard)
 export const REWARD_PER_ENEMY_KILL = 0.02   // per enemy unit killed in combat
 export const REWARD_HP_SCALE = 0.005        // HP preservation bonus on win
-export const REWARD_PER_SURVIVE_ROUND = 0.12 // bonus for every alive player each round
+// REMOVED: REWARD_PER_SURVIVE_ROUND was +0.12/round = ~2.2 free reward per game.
+// Incentivized coasting (staying alive = good) instead of winning (placement reward
+// already handles this). Removed to reduce reward creep. Placement table is the
+// sole signal for "staying alive matters."
 
 // ─── New: Depth-Based Synergy Reward (v1.2) ─────────────────────────
 // Rewards active synergies based on breakpoint depth, normalized by total breakpoints.
 // Splash/inactive synergies get nothing (no penalty either).
-export const SYNERGY_DEPTH_BASE = 0.10          // per-synergy: base × tier_hit × (tier_hit / max_tiers)
+export const SYNERGY_DEPTH_BASE = 0.075         // per-synergy: base × tier_hit × (tier_hit / max_tiers)
+                                                 // v2: cut from 0.10 to 0.075 (reward creep fix — was accumulating
+                                                 // 9-18 total per game, enough to cancel a 6th-place penalty alone)
 export const SYNERGY_ACTIVE_COUNT_BONUS = 0.1   // multiplier bonus per active synergy on final total
 
 // ─── New: Gold Excess Penalty (v1.2) ────────────────────────────────
@@ -196,11 +220,6 @@ export const UNIT_QUALITY_RARITY_DISCOUNT: Record<string, number> = {
   SPECIAL:   0.4   // 60% of penalty
 }
 
-// Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
-// When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
-// Toggle via environment variable: SELF_PLAY=true
-export const SELF_PLAY = process.env.SELF_PLAY === "true"
-
 // HTTP server port for training API
 export const TRAINING_API_PORT = parseInt(process.env.TRAINING_PORT ?? "9100")
 
@@ -222,9 +241,26 @@ export const REWARD_SELL_EVOLVED = -0.15
 // This is pure gold waste — the agent should use REMOVE_SHOP instead
 export const REWARD_BUY_THEN_SELL = -1.0
 
-// Level-up reward: only when board is reasonably filled (boardSize >= maxTeamSize - 2)
-// Prevents the "level to 9 with 3 units" degenerate strategy
-export const REWARD_LEVEL_UP = 0.10
+// ─── Level-up reward v2 (economy-first design) ─────────────────────
+// High-level play: economy is king. Every gold spent on XP before 50g is
+// gold NOT earning interest. Leveling is almost always wrong early/mid game.
+//
+// Design: leveling is PENALIZED by default. Two exceptions:
+//   1. "Stage 9 level-to-5" window: stage 9 is PVE (Gyarados). You NEED to be
+//      level 5 to beat it and win an item. This is the ONE acceptable time to
+//      break economy for XP — but ONLY to reach level 5, nothing higher.
+//   2. "Rich leveling" (gold >= 50 AFTER the buy): once at max interest, spending
+//      4g on XP doesn't lose interest if you still have 50g+. This is correct
+//      play in mid-late game. Neutral (0 reward, 0 penalty).
+//
+// Default penalty is moderate (-0.15) — strong enough to overcome any incidental
+// positive signal, but not so harsh it dominates placement rewards.
+// Calibration: interest bonus is 0.12/gold/round, gold standard is 0.30/round.
+// Losing one interest tier (dropping from 50g to 46g) costs ~0.42/round in shaping.
+// The -0.15 penalty stacks ON TOP of that lost income signal.
+export const REWARD_LEVEL_UP_PENALTY = -0.15         // default: leveling hurts economy
+export const REWARD_LEVEL_UP_STAGE9_TO5 = 0.10       // exception: level to 5 at stage 9 (PVE Gyarados)
+export const LEVEL_UP_RICH_THRESHOLD = 50            // gold floor: leveling at >= 50g is neutral (0)
 
 // Reroll reward: base incentive to refresh shop.
 // Layer 1: doubled when gold >= 50 (saving more is pointless, spend productively).
@@ -234,6 +270,25 @@ export const REWARD_REROLL = 0.03
 export const REWARD_REROLL_LATEGAME = 0.05   // after stage 20, stronger push to spend gold on rerolls
 export const REROLL_BOOST_GOLD_THRESHOLD = 50 // gold level where reroll reward doubles
 export const REROLL_BOOST_LEVEL_THRESHOLD = 8 // player level where reroll reward doubles
+
+// ─── Reroll Below Economy Penalty (v1.5) ─────────────────────────────
+// Penalizes rerolling when gold < 50 (breaking interest tiers to fish for units).
+// Penalty = half the current interest reward signal per reroll.
+// Uses PRE-reroll money to compute interest (what you had before spending the 1g).
+// Example: at 30g (interest=3), penalty = -(3 × 0.12) / 2 = -0.18 per reroll.
+// FLOOR: at 0-9g interest is 0, so without a floor the penalty vanishes and the
+// agent gets a free +0.03 reroll reward.  Floor matches the 10g tier (-0.06).
+// DISABLED when gold pressure is active (non-SAFE tier) — if you're dying, spend freely.
+export const REROLL_ECO_PENALTY_DIVISOR = 2   // penalty = interestSignal / this value
+export const REROLL_ECO_PENALTY_FLOOR = -0.06 // minimum penalty even at 0 interest (matches 10g tier)
+
+// ─── Empty Turn Penalty (v1.5) ───────────────────────────────────────
+// Penalizes hitting END_TURN as the very first action (0 productive actions).
+// Only fires past stage 15 AND when gold >= 50 — under 50g, re-ecoing is fine.
+// At 50g+ the agent has resources; doing nothing is coasting.
+export const REWARD_EMPTY_TURN_PENALTY = -0.15
+export const EMPTY_TURN_MIN_STAGE = 16        // "past stage 15" = stage 16+
+export const EMPTY_TURN_GOLD_FLOOR = 50       // only penalize when holding this much
 
 // ─── Evo-from-Reroll Bonus (v1.4) ───────────────────────────────────
 // Flat bonus when a reroll leads to buying an evolution (star-up).
@@ -253,9 +308,12 @@ export const REWARD_EVO_FROM_REROLL: Record<string, number> = {
   SPECIAL:   1.00
 }
 
-// Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
-export const REWARD_KEEP_UNIQUE = 0.007
-export const REWARD_KEEP_LEGENDARY = 0.007
+// Per-ROUND bonus for keeping unique/legendary units on board (not bench, not sold).
+// v2: moved from per-step to per-round (was accumulating 2-4 total per game at
+// 0.007/step × ~270 steps). Now fires once per fight in runFightPhase().
+// Bumped to 0.08/unit/round to keep the signal meaningful.
+export const REWARD_KEEP_UNIQUE = 0.08
+export const REWARD_KEEP_LEGENDARY = 0.08
 
 // Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
 export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
