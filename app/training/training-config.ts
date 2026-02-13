@@ -104,45 +104,46 @@ export const REWARD_PER_WIN = 0.75
 export const REWARD_PER_LOSS = -0.5
 export const REWARD_PER_DRAW = 0.0
 
-// ─── Stage-Scaled Battle Rewards (v1.4) ──────────────────────────────
-// Late-game wins are worth more to incentivize board investment.
-// Losses scale at half rate so the agent isn't over-punished for losing late.
-// Formula: reward × (1 + scaling). Win at stage 22 → 0.75 × 2.5 = 1.875.
+// ─── Stage-Scaled Battle Rewards (v1.6) ──────────────────────────────
+// v1.6: Early PVE wins heavily discounted (×0.25), late wins boosted (×3.0).
+// Old scaling gave full credit for beating Magikarp — free +3.75 in stages 1-5.
+// Now early wins total ~0.94 and late wins are the dominant battle signal.
+// Formula: reward × scaling. Win at stage 22 → 0.75 × 3.0 = 2.25.
 export const BATTLE_WIN_SCALING: Record<string, number> = {
-  STAGE_1_5:     0,     // ×1.0 (base)
-  STAGE_6_10:    0.25,  // ×1.25
-  STAGE_11_15:   0.5,   // ×1.5
-  STAGE_16_20:   1.0,   // ×2.0
-  STAGE_21_PLUS: 1.5    // ×2.5
+  STAGE_1_5:     -0.75, // ×0.25 (was ×1.0) — PVE freebies worth almost nothing
+  STAGE_6_10:    -0.50, // ×0.50 (was ×1.25)
+  STAGE_11_15:   0,     // ×1.0  (was ×1.5)
+  STAGE_16_20:   1.0,   // ×2.0  (unchanged)
+  STAGE_21_PLUS: 2.0    // ×3.0  (was ×2.5)
 }
 export const BATTLE_LOSS_SCALING: Record<string, number> = {
-  STAGE_1_5:     0,     // ×1.0 (base)
-  STAGE_6_10:    0.125, // ×1.125
-  STAGE_11_15:   0.25,  // ×1.25
-  STAGE_16_20:   0.5,   // ×1.5
-  STAGE_21_PLUS: 0.75   // ×1.75
+  STAGE_1_5:     -0.50, // ×0.50 (was ×1.0) — early losses less punishing
+  STAGE_6_10:    -0.25, // ×0.75 (was ×1.125)
+  STAGE_11_15:   0,     // ×1.0  (was ×1.25)
+  STAGE_16_20:   0.5,   // ×1.5  (unchanged)
+  STAGE_21_PLUS: 1.0    // ×2.0  (was ×1.75)
 }
 // Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
 // Steep curve: big rewards for winning, brutal penalties for losing.
-// Only top-3 get positive reward; 4th is now punished (-3) to prevent coasting.
-// Bottom-4 shifted down by 3 accordingly. Total spread: 48 (25 to -23).
+// v1.6: bumped top/bottom to increase placement dominance over shaped rewards.
+// Only top-3 get positive reward; 4th penalized. Total spread: 54 (28 to -26).
 export const REWARD_PLACEMENT_TABLE: readonly number[] = [
-  +25.0, // 1st
-  +13.0, // 2nd
+  +28.0, // 1st  (was +25)
+  +15.0, // 2nd  (was +13)
    +8.0, // 3rd
-   -3.0, // 4th
-   -7.0, // 5th
-  -12.0, // 6th
-  -17.0, // 7th
-  -23.0, // 8th
+   -5.0, // 4th  (was -3)
+   -9.0, // 5th  (was -7)
+  -14.0, // 6th  (was -12)
+  -19.0, // 7th  (was -17)
+  -26.0, // 8th  (was -23)
 ]
 
 // Shaped rewards (Phase 6) — economy signals
-export const REWARD_INTEREST_BONUS = 0.12   // per interest gold earned (with board guard). Boosted from 0.05 to incentivize eco
+export const REWARD_INTEREST_BONUS = 0.06   // per interest gold earned (with board guard). Cut from 0.12 — was +4.2/game free farming
 // Gold Standard: flat bonus each round the agent holds >= 50g at income time.
 // 50g is the eco breakpoint in auto chess (max 5 interest). Agent should reach 50g
 // and hold it as long as possible, only spending when gold pressure forces it (low HP).
-// Combined with interest: 5×0.12 + 0.30 = 0.90/round at 50g. Over 15 rounds = ~13.5 total.
+// Combined with interest: 5×0.06 + 0.30 = 0.60/round at 50g. Over 15 rounds = ~9.0 total.
 export const REWARD_GOLD_STANDARD = 0.30    // flat bonus per round when gold >= 50 (with board guard)
 export const REWARD_PER_ENEMY_KILL = 0.02   // per enemy unit killed in combat
 export const REWARD_HP_SCALE = 0.005        // HP preservation bonus on win
@@ -262,12 +263,12 @@ export const REWARD_LEVEL_UP_PENALTY = -0.15         // default: leveling hurts 
 export const REWARD_LEVEL_UP_STAGE9_TO5 = 0.10       // exception: level to 5 at stage 9 (PVE Gyarados)
 export const LEVEL_UP_RICH_THRESHOLD = 50            // gold floor: leveling at >= 50g is neutral (0)
 
-// Reroll reward: base incentive to refresh shop.
-// Layer 1: doubled when gold >= 50 (saving more is pointless, spend productively).
-// Layer 2: doubled when level >= 8 (can't buy XP, rolling is the only productive spend).
-// These stack: level 9 with 50g+ → ×4 base reward.
-export const REWARD_REROLL = 0.03
-export const REWARD_REROLL_LATEGAME = 0.05   // after stage 20, stronger push to spend gold on rerolls
+// Reroll reward: DISABLED (v1.6). Was +0.03 base, caused reward hacking — agent spammed
+// 50 rerolls/game for free reward instead of rolling to find upgrades.
+// Rerolling is a tool, not a goal. The agent should reroll when it leads to buys/evolutions,
+// which are already rewarded by buyEvolution / buyDuplicate / synergy signals.
+export const REWARD_REROLL = 0
+export const REWARD_REROLL_LATEGAME = 0      // was 0.05; disabled alongside base reroll reward
 export const REROLL_BOOST_GOLD_THRESHOLD = 50 // gold level where reroll reward doubles
 export const REROLL_BOOST_LEVEL_THRESHOLD = 8 // player level where reroll reward doubles
 
@@ -312,8 +313,8 @@ export const REWARD_EVO_FROM_REROLL: Record<string, number> = {
 // v2: moved from per-step to per-round (was accumulating 2-4 total per game at
 // 0.007/step × ~270 steps). Now fires once per fight in runFightPhase().
 // Bumped to 0.08/unit/round to keep the signal meaningful.
-export const REWARD_KEEP_UNIQUE = 0.08
-export const REWARD_KEEP_LEGENDARY = 0.08
+export const REWARD_KEEP_UNIQUE = 0.04     // cut from 0.08 — was +2.5/game just for owning units
+export const REWARD_KEEP_LEGENDARY = 0.04
 
 // Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
 export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy
