@@ -146,6 +146,16 @@ export const BENCH_DEAD_WEIGHT_BY_STAGE: Record<string, number> = {
   STAGE_21_PLUS: -0.10
 }
 
+// ─── New: Board Unit Quality Penalty (v1.3) ─────────────────────────
+// Pressure the agent to upgrade or replace 1-star units as the game progresses.
+// Units contributing to an active synergy (at/above first breakpoint) get lighter penalty.
+export const UNIT_QUALITY_STAGES: Record<string, { withSynergy: number; withoutSynergy: number }> = {
+  STAGE_1_8:     { withSynergy: 0,     withoutSynergy: 0 },
+  STAGE_9_13:    { withSynergy: -0.01, withoutSynergy: -0.03 },
+  STAGE_14_18:   { withSynergy: -0.02, withoutSynergy: -0.06 },
+  STAGE_19_PLUS: { withSynergy: -0.05, withoutSynergy: -0.10 }
+}
+
 // Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
 // When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
 // Toggle via environment variable: SELF_PLAY=true

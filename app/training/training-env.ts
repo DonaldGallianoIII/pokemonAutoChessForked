@@ -76,6 +76,7 @@ import {
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
   BENCH_DEAD_WEIGHT_BY_STAGE,
+  UNIT_QUALITY_STAGES,
   GOLD_EXCESS_BASE_RATE,
   GOLD_EXCESS_GRACE,
   GOLD_EXCESS_MAX_PENALTY,
@@ -1392,6 +1393,42 @@ export class TrainingEnv {
       })
       if (deadWeight > 0) {
         rewards.set(id, (rewards.get(id) ?? 0) + deadWeight * penaltyRate)
+      }
+    })
+
+    // 6.8: Board Unit Quality Penalty — pressure to upgrade/replace 1-star units.
+    // Units contributing to an active synergy get lighter penalty.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const stage = this.state.stageLevel
+      let rates: typeof UNIT_QUALITY_STAGES[string]
+      if (stage >= 19)      rates = UNIT_QUALITY_STAGES.STAGE_19_PLUS
+      else if (stage >= 14) rates = UNIT_QUALITY_STAGES.STAGE_14_18
+      else if (stage >= 9)  rates = UNIT_QUALITY_STAGES.STAGE_9_13
+      else                  rates = UNIT_QUALITY_STAGES.STAGE_1_8
+
+      if (rates.withSynergy >= 0 && rates.withoutSynergy >= 0) return // stages 1-8: no penalty
+
+      // Build set of synergies that have reached their first breakpoint
+      const activeSynergies = new Set<Synergy>()
+      player.synergies.forEach((value, synergy) => {
+        const triggers = SynergyTriggers[synergy as Synergy]
+        if (triggers && triggers.length > 0 && value >= triggers[0]) {
+          activeSynergies.add(synergy as Synergy)
+        }
+      })
+
+      let totalPenalty = 0
+      player.board.forEach((p) => {
+        if (p.positionY > 0 && p.stars === 1) {
+          // Check if this unit contributes to any active synergy
+          const data = getPokemonData(p.name)
+          const hasActiveSynergy = data.types.some((t: Synergy) => activeSynergies.has(t))
+          totalPenalty += hasActiveSynergy ? rates.withSynergy : rates.withoutSynergy
+        }
+      })
+      if (totalPenalty < 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + totalPenalty)
       }
     })
 
