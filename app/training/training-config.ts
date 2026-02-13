@@ -236,9 +236,33 @@ export const REWARD_SELL_EVOLVED = -0.15
 // This is pure gold waste — the agent should use REMOVE_SHOP instead
 export const REWARD_BUY_THEN_SELL = -1.0
 
-// Level-up reward: only when board is reasonably filled (boardSize >= maxTeamSize - 2)
-// Prevents the "level to 9 with 3 units" degenerate strategy
-export const REWARD_LEVEL_UP = 0.10
+// ─── Level-up reward (stage-gated pacing table) ────────────────────
+// Level-up only gives reward when the current stage >= minStage for that level.
+// Leveling earlier than minStage gives 0 reward (no penalty, just no incentive).
+// This prevents power-leveling (dumping gold into XP at stage 5 to hit level 7).
+//
+// The board-fill check (boardSize >= maxTeamSize - 2) is still applied on top.
+//
+// Pacing rationale (2 free XP/round, 4 XP per 4-gold buy):
+//   Level 3-4: cheap (4 XP each), fine to buy early → rewarded from stage 1
+//   Level 5:   costs 12 XP (3 buys = 12g) — don't rush before stage 6
+//   Level 6:   costs 12 XP more — stage 9+ keeps economy intact
+//   Level 7:   costs 18 XP (4-5 buys = 16-20g) — stage 13+ is on-pace
+//   Level 8:   costs 20 XP — stage 18+ (late game territory)
+//   Level 9:   costs 183 XP — stage 24+ (only achievable with sustained gold)
+//
+// reward: how much reward to grant when leveling at or after minStage.
+// Levels 3-4 are low-reward (trivial decisions); levels 7-8 are high-reward
+// (meaningful strategic choices about when to commit gold).
+export const LEVEL_UP_REWARD_TABLE: Record<number, { minStage: number; reward: number }> = {
+  3:  { minStage: 1,  reward: 0.03 },  // trivial, almost free
+  4:  { minStage: 3,  reward: 0.03 },  // still cheap
+  5:  { minStage: 6,  reward: 0.08 },  // first meaningful gold decision
+  6:  { minStage: 9,  reward: 0.10 },  // core mid-game level
+  7:  { minStage: 13, reward: 0.12 },  // expensive, must have economy
+  8:  { minStage: 18, reward: 0.15 },  // late-game commitment
+  9:  { minStage: 24, reward: 0.20 },  // huge gold sink, only when it counts
+}
 
 // Reroll reward: base incentive to refresh shop.
 // Layer 1: doubled when gold >= 50 (saving more is pointless, spend productively).

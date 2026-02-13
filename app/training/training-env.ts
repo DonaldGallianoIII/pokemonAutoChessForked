@@ -91,7 +91,7 @@ import {
   REWARD_BUY_DUPLICATE_LATEGAME,
   REWARD_BUY_EVOLUTION,
   REWARD_BUY_EVOLUTION_LATEGAME,
-  REWARD_LEVEL_UP,
+  LEVEL_UP_REWARD_TABLE,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
   REWARD_REROLL_LATEGAME,
@@ -516,14 +516,18 @@ export class TrainingEnv {
       // Used for evo-from-reroll detection on the next BUY action.
       this.lastActionWasRefresh = (action === TrainingAction.REFRESH && actionExecuted)
 
-      // Level-up reward: only when board is reasonably filled
+      // Level-up reward: stage-gated pacing table + board-fill check.
+      // Only rewards leveling when (a) stage is at or past the minStage for
+      // that level, and (b) board is reasonably filled. Leveling too early
+      // (power-leveling) gives 0 reward — no penalty, just no incentive.
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
-        const maxTeamSize = getMaxTeamSize(
-          agent.experienceManager.level,
-          this.state.specialGameRule
-        )
-        if (agent.boardSize >= maxTeamSize - 2) {
-          reward += REWARD_LEVEL_UP; this.trackReward("levelUp", REWARD_LEVEL_UP)
+        const newLevel = agent.experienceManager.level
+        const entry = LEVEL_UP_REWARD_TABLE[newLevel]
+        if (entry && this.state.stageLevel >= entry.minStage) {
+          const maxTeamSize = getMaxTeamSize(newLevel, this.state.specialGameRule)
+          if (agent.boardSize >= maxTeamSize - 2) {
+            reward += entry.reward; this.trackReward("levelUp", entry.reward)
+          }
         }
       }
 
@@ -2822,6 +2826,19 @@ export class TrainingEnv {
       } else if (isBuyBatch && actionExecutedBatch && preBuyCopiesBatch === 1) {
         const prev = dupBuyRewards.get(playerId) ?? 0
         dupBuyRewards.set(playerId, prev + (lateGameBatch ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE))
+      }
+
+      // Level-up reward: stage-gated pacing table (same logic as single-agent path)
+      if (action === TrainingAction.LEVEL_UP && actionExecutedBatch) {
+        const newLevel = player.experienceManager.level
+        const entry = LEVEL_UP_REWARD_TABLE[newLevel]
+        if (entry && this.state.stageLevel >= entry.minStage) {
+          const maxTeamSize = getMaxTeamSize(newLevel, this.state.specialGameRule)
+          if (player.boardSize >= maxTeamSize - 2) {
+            const prev = dupBuyRewards.get(playerId) ?? 0
+            dupBuyRewards.set(playerId, prev + entry.reward)
+          }
+        }
       }
 
       const actCount = (this.actionsPerPlayer.get(playerId) ?? 0) + 1
