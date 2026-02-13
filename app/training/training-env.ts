@@ -180,10 +180,12 @@ export class TrainingEnv {
   // prevActiveSynergyCount removed in v1.2 (synergy delta replaced by depth-based reward)
   // Per-turn reward breakdown: accumulates named reward signals for debugging/replay
   rewardBreakdown: Record<string, number> = {}
-  // Per-turn behavioral counters (reset each turn)
-  turnBuyCount = 0
-  turnSellCount = 0
-  turnRerollCount = 0
+  // Cumulative behavioral counters (accumulate across the whole game, like rewardBreakdown)
+  cumulativeBuyCount = 0
+  cumulativeSellCount = 0
+  cumulativeRerollCount = 0
+  cumulativeGoldSpent = 0
+  // Snapshot of gold at the start of each pick phase, for computing goldSpent delta
   turnGoldAtStart = 0
   // Per-fight dead-weight count (computed during fight phase)
   lastBenchDeadWeightCount = 0
@@ -331,9 +333,10 @@ export class TrainingEnv {
     this.lastBattleResult = null
     // prevActiveSynergyCount removed in v1.2
     this.rewardBreakdown = {}
-    this.turnBuyCount = 0
-    this.turnSellCount = 0
-    this.turnRerollCount = 0
+    this.cumulativeBuyCount = 0
+    this.cumulativeSellCount = 0
+    this.cumulativeRerollCount = 0
+    this.cumulativeGoldSpent = 0
     this.turnGoldAtStart = 0
     this.lastBenchDeadWeightCount = 0
     this.positionGridCache.clear()
@@ -403,7 +406,7 @@ export class TrainingEnv {
       // Check pre-buy count: 1 existing = 2nd copy, 2 existing = 3rd copy (evolution!)
       // After stage 20, boost rewards to encourage spending gold on upgrades.
       const lateGame = this.state.stageLevel > 20
-      if (isBuy && actionExecuted) this.turnBuyCount++
+      if (isBuy && actionExecuted) this.cumulativeBuyCount++
       if (isBuy && actionExecuted && preBuyCopies >= 2) {
         const r = lateGame ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION
         reward += r; this.trackReward("buyEvolution", r)
@@ -433,7 +436,7 @@ export class TrainingEnv {
       // Sell penalty: penalize selling evolved (2+ star) units
       const isSell = action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31
       if (isSell && actionExecuted) {
-        this.turnSellCount++
+        this.cumulativeSellCount++
         if (this.lastSoldStars >= 2) {
           reward += REWARD_SELL_EVOLVED; this.trackReward("sellEvolved", REWARD_SELL_EVOLVED)
         }
@@ -470,7 +473,7 @@ export class TrainingEnv {
 
       // Reroll reward: unconditional incentive to refresh shop (boosted late game)
       if (action === TrainingAction.REFRESH && actionExecuted) {
-        this.turnRerollCount++
+        this.cumulativeRerollCount++
         const r = lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
         reward += r; this.trackReward("reroll", r)
       }
@@ -574,13 +577,12 @@ export class TrainingEnv {
         this.consecutiveMoves = 0
         this.lastMoveCell = -1
         this.lockShopUsedThisTurn = false
-        // Note: rewardBreakdown accumulates across the whole game (not reset per turn)
-        // so that the terminal info dict contains full-game totals.
-        // Reset per-turn behavioral counters for the new turn
+        // Note: rewardBreakdown and behavioral counters accumulate across the whole
+        // game (not reset per turn) so the terminal info dict has full-game totals.
+        // Only update goldSpent (cumulative) and turnGoldAtStart for the new turn.
         const agentNow = this.state.players.get(this.agentId)
-        this.turnBuyCount = 0
-        this.turnSellCount = 0
-        this.turnRerollCount = 0
+        const spent = Math.max(0, this.turnGoldAtStart - (agentNow?.money ?? 0))
+        this.cumulativeGoldSpent += spent
         this.turnGoldAtStart = agentNow?.money ?? 0
       }
     }
@@ -2513,10 +2515,10 @@ export class TrainingEnv {
       opponent: opponentInfo,
       rewardBreakdown: { ...this.rewardBreakdown },
       benchDeadWeightCount: this.lastBenchDeadWeightCount,
-      buyCount: this.turnBuyCount,
-      sellCount: this.turnSellCount,
-      rerollCount: this.turnRerollCount,
-      goldSpent: Math.max(0, this.turnGoldAtStart - (agent?.money ?? 0))
+      buyCount: this.cumulativeBuyCount,
+      sellCount: this.cumulativeSellCount,
+      rerollCount: this.cumulativeRerollCount,
+      goldSpent: this.cumulativeGoldSpent
     }
   }
 

@@ -132,29 +132,51 @@ class GameMetrics:
 
     def __init__(self):
         self.fights: list[FightSnapshot] = []
-        self.total_rerolls = 0
         self.peak_gold = 0
-        self.gold_at_death: float | None = None
+        self.gold_at_end: float | None = None
+        self.final_rank: int | None = None
+        # Track cumulative counters for delta computation
+        self._prev_reroll_count = 0
 
     def add_fight(self, snapshot: FightSnapshot):
         self.fights.append(snapshot)
-        self.total_rerolls += snapshot.reroll_count
         if snapshot.gold > self.peak_gold:
             self.peak_gold = snapshot.gold
+        # Compute per-fight delta from cumulative reroll counter
+        snapshot._reroll_delta = snapshot.reroll_count - self._prev_reroll_count
+        self._prev_reroll_count = snapshot.reroll_count
 
-    def set_death(self, gold: float):
-        self.gold_at_death = gold
+    def set_end(self, gold: float, rank: int):
+        """Call at game end with final gold and placement rank."""
+        self.gold_at_end = gold
+        self.final_rank = rank
 
     def _fights_in_stage_range(self, lo: int, hi: int) -> list[FightSnapshot]:
         return [f for f in self.fights if lo <= f.stage <= hi]
 
+    def _total_rerolls(self) -> int:
+        """Get total rerolls from cumulative counter on last fight snapshot."""
+        if not self.fights:
+            return 0
+        return self.fights[-1].reroll_count
+
+    def _rerolls_after_stage(self, min_stage: int) -> int:
+        """Sum per-fight reroll deltas for fights at or after min_stage."""
+        return sum(
+            getattr(f, "_reroll_delta", 0)
+            for f in self.fights if f.stage >= min_stage
+        )
+
     def generate_flags(self) -> list[tuple[str, str]]:
         """Generate behavioral warning/info/good flags. Returns [(severity, message)]."""
         flags: list[tuple[str, str]] = []
+        died = self.final_rank is not None and self.final_rank > 1
 
-        # Died rich
-        if self.gold_at_death is not None and self.gold_at_death > 30:
-            flags.append(("WARN", f"Died with {self.gold_at_death:.0f}g (gold_at_death)"))
+        # Ended rich (only flag if agent didn't win)
+        if died and self.gold_at_end is not None and self.gold_at_end > 30:
+            flags.append(("WARN", f"Died with {self.gold_at_end:.0f}g (gold_at_death)"))
+        elif not died and self.gold_at_end is not None and self.gold_at_end > 50:
+            flags.append(("INFO", f"Won with {self.gold_at_end:.0f}g unspent"))
 
         # Zoo board
         late_fights = self._fights_in_stage_range(19, 999)
@@ -163,11 +185,13 @@ class GameMetrics:
                 flags.append(("WARN", f"{f.one_star_count} one-star units on board at stage {f.stage}"))
                 break
 
-        # Never rolled
-        if self.total_rerolls == 0 and len(self.fights) > 15:
+        # Never rolled (single check using cumulative counter)
+        rolls_after_15 = self._rerolls_after_stage(15)
+        total_rerolls = self._total_rerolls()
+        if total_rerolls == 0 and len(self.fights) > 15:
+            flags.append(("WARN", "Never rolled entire game"))
+        elif rolls_after_15 == 0 and any(f.stage >= 15 for f in self.fights):
             flags.append(("WARN", "Never rolled after stage 15"))
-        elif self.total_rerolls == 0 and len(self.fights) > 10:
-            pass  # still early, no warning
 
         # Gold pressure alert
         for f in self.fights:
@@ -223,8 +247,8 @@ class GameMetrics:
                 break
 
         # Clean econ (good)
-        if self.gold_at_death is not None and self.gold_at_death < 10:
-            flags.append(("GOOD", f"Clean econ: died with only {self.gold_at_death:.0f}g"))
+        if died and self.gold_at_end is not None and self.gold_at_end < 10:
+            flags.append(("GOOD", f"Clean econ: died with only {self.gold_at_end:.0f}g"))
 
         # Peak gold
         flags.append(("INFO", f"Peak gold: {self.peak_gold}g"))
@@ -233,11 +257,6 @@ class GameMetrics:
         if self.fights:
             peak_syn = max(f.active_synergies for f in self.fights)
             flags.append(("INFO", f"Active synergies peaked at {peak_syn}"))
-
-        # Rolls after stage 15
-        rolls_after_15 = sum(f.reroll_count for f in self.fights if f.stage >= 15)
-        if rolls_after_15 == 0 and any(f.stage >= 15 for f in self.fights):
-            flags.append(("WARN", "Never rolled after stage 15"))
 
         return flags
 
@@ -261,8 +280,8 @@ class GameMetrics:
             result["gold_at_fight_late"] = sum(f.gold for f in late) / len(late)
 
         result["peak_gold"] = float(self.peak_gold)
-        if self.gold_at_death is not None:
-            result["gold_at_death"] = self.gold_at_death
+        if self.gold_at_end is not None:
+            result["gold_at_end"] = self.gold_at_end
 
         # One-star percentage by stage range
         if early:
@@ -287,11 +306,9 @@ class GameMetrics:
         if late:
             result["bench_deadweight_late"] = sum(f.bench_dead_weight for f in late) / len(late)
 
-        # Total rolls
-        result["total_rolls_per_game"] = float(self.total_rerolls)
-        result["rolls_after_stage_15"] = float(
-            sum(f.reroll_count for f in self.fights if f.stage >= 15)
-        )
+        # Total rolls (from cumulative counter on last fight)
+        result["total_rolls_per_game"] = float(self._total_rerolls())
+        result["rolls_after_stage_15"] = float(self._rerolls_after_stage(15))
 
         # Board full percentage
         full_pct = sum(1 for f in self.fights if f.board_size >= f.max_team) / len(self.fights)
@@ -301,9 +318,10 @@ class GameMetrics:
         alert_hit = any(f.pressure_tier == "ALERT" for f in self.fights)
         result["pressure_alert_hit"] = 1.0 if alert_hit else 0.0
 
-        # Died rich
-        if self.gold_at_death is not None:
-            result["died_rich"] = 1.0 if self.gold_at_death > 30 else 0.0
+        # Died rich (only if agent didn't win)
+        died = self.final_rank is not None and self.final_rank > 1
+        if died and self.gold_at_end is not None:
+            result["died_rich"] = 1.0 if self.gold_at_end > 30 else 0.0
 
         return result
 
