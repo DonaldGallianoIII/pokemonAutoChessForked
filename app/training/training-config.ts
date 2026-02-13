@@ -192,7 +192,7 @@ export const REWARD_GOLD_CRITICAL_HP = -0.1             // per gold held when HP
 
 // Dead-weight bench penalty: when HP < 20, bench units not in the same evolution family
 // as any board unit are dead weight — sell them and spend the gold.
-export const REWARD_BENCH_DEAD_WEIGHT = -1.0            // per non-matching bench unit when HP < threshold
+export const REWARD_BENCH_DEAD_WEIGHT = -0.2            // per non-matching bench unit when HP < threshold
 
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 
