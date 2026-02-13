@@ -409,7 +409,10 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
                 game_metrics.add_fight(snapshot)
 
         # Game ended
-        game_metrics.set_death(info.get("money", info.get("gold", 0)))
+        game_metrics.set_end(
+            gold=info.get("money", info.get("gold", 0)),
+            rank=info.get("rank", 8),
+        )
 
         rank = info.get("rank", 8)
         stage = info.get("stage", 0)

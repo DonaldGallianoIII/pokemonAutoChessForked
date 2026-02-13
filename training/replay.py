@@ -398,8 +398,11 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     final_life = info.get("life", 0)
     final_level = info.get("level", "?")
 
-    # Record gold at death for behavioral flags
-    game_metrics.set_death(info.get("money", info.get("gold", 0)))
+    # Record final state for behavioral flags
+    game_metrics.set_end(
+        gold=info.get("money", info.get("gold", 0)),
+        rank=int(final_rank) if isinstance(final_rank, (int, float)) else 8,
+    )
 
     print()
     print("=" * 60)
