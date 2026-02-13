@@ -348,6 +348,8 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
     ranks = []
     rewards = []
     stages = []
+    # Accumulate reward breakdown across all games (sum per signal)
+    all_breakdowns: list[dict] = []
 
     for i in range(n_games):
         obs, info = env.reset()
@@ -364,6 +366,8 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
         ranks.append(info.get("rank", 8))
         rewards.append(total_reward)
         stages.append(info.get("stage", 0))
+        # Terminal info has full-game cumulative breakdown
+        all_breakdowns.append(info.get("rewardBreakdown", {}))
         print(
             f"  Game {i+1}/{n_games}: Rank={ranks[-1]}, "
             f"Stage={stages[-1]}, Reward={total_reward:.2f}"
@@ -375,6 +379,24 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
     print(f"  Mean Stage:   {np.mean(stages):.1f}")
     print(f"  Win Rate:     {sum(1 for r in ranks if r == 1) / n_games:.1%}")
     print(f"  Top 4 Rate:   {sum(1 for r in ranks if r <= 4) / n_games:.1%}")
+
+    # Print mean reward breakdown across all games
+    if all_breakdowns:
+        all_keys = sorted(set(k for bd in all_breakdowns for k in bd))
+        print(f"\n  --- Mean Reward Breakdown (per game, {n_games} games) ---")
+        total_mean = 0.0
+        for key in all_keys:
+            vals = [bd.get(key, 0.0) for bd in all_breakdowns]
+            mean_val = np.mean(vals)
+            std_val = np.std(vals)
+            if abs(mean_val) < 0.001 and std_val < 0.001:
+                continue
+            marker = "+" if mean_val > 0 else " "
+            print(f"    {key:<24} {marker}{mean_val:>8.2f}  +/- {std_val:>6.2f}")
+            total_mean += mean_val
+        print(f"    {'─' * 47}")
+        marker = "+" if total_mean > 0 else " "
+        print(f"    {'TOTAL':<24} {marker}{total_mean:>8.2f}")
 
 
 if __name__ == "__main__":

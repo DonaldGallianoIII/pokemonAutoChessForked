@@ -113,6 +113,27 @@ def _print_board_state(info: dict):
     print()
 
 
+def _print_reward_breakdown(info: dict):
+    """Print the per-signal reward breakdown for this turn/fight."""
+    breakdown = info.get("rewardBreakdown", {})
+    if not breakdown:
+        return
+    print("  --- Reward Breakdown ---")
+    total = 0.0
+    # Sort: positives first (descending), then negatives (ascending)
+    items = sorted(breakdown.items(), key=lambda kv: (-kv[1], kv[0]))
+    for key, val in items:
+        if abs(val) < 0.0005:
+            continue  # skip zero entries
+        marker = "+" if val > 0 else " "
+        print(f"    {key:<24} {marker}{val:>8.3f}")
+        total += val
+    print(f"    {'─' * 35}")
+    marker = "+" if total > 0 else " "
+    print(f"    {'TOTAL':<24} {marker}{total:>8.3f}")
+    print()
+
+
 def _print_opponent(info: dict):
     """Print the opponent's team the agent just fought against."""
     opp = info.get("opponent")
@@ -248,6 +269,7 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     wins = 0
     losses = 0
     draws = 0
+    prev_breakdown: dict[str, float] = {}  # track cumulative breakdown for delta computation
 
     # Track observation bounds across the entire game
     obs_global_min = obs.min()
@@ -340,7 +362,16 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
                   f"totalMoney={obs[12]:.3f} totalDmg={obs[13]:.3f} "
                   f"| raw gold~{obs[1]*300:.0f}g | min={obs.min():.3f} max={obs.max():.3f}")
 
-            # Print opponent team, then our board state for the upcoming turn
+            # Compute per-fight delta from cumulative breakdown
+            cumulative = info.get("rewardBreakdown", {})
+            fight_delta = {}
+            for key, val in cumulative.items():
+                delta = val - prev_breakdown.get(key, 0.0)
+                if abs(delta) >= 0.0005:
+                    fight_delta[key] = delta
+            prev_breakdown = dict(cumulative)
+            _print_reward_breakdown({"rewardBreakdown": fight_delta})
+
             _print_opponent(info)
             _print_board_state(info)
 
@@ -364,6 +395,10 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     print(f"  Total Steps:    {total_steps}")
     print(f"  Total Reward:   {total_reward:+.3f}")
     print(f"  Fights:         {fights}  (W:{wins} / L:{losses} / D:{draws})")
+
+    # Full-game cumulative reward breakdown (includes placement reward)
+    print("  --- Full-Game Reward Breakdown ---")
+    _print_reward_breakdown(info)
 
     # Observation bounds report
     print()
