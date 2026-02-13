@@ -26,6 +26,13 @@ import time
 import numpy as np
 import requests
 
+from eval_metrics import (
+    FightSnapshot,
+    GameMetrics,
+    format_enhanced_fight_line,
+    format_flags,
+)
+
 
 # ---------------------------------------------------------------------------
 # Reward thresholds for fight-result inference.
@@ -110,6 +117,27 @@ def _print_board_state(info: dict):
         shop_parts.append(s if s else "---")
     print(f"    shop: [{' | '.join(shop_parts)}]")
 
+    print()
+
+
+def _print_reward_breakdown(info: dict):
+    """Print the per-signal reward breakdown for this turn/fight."""
+    breakdown = info.get("rewardBreakdown", {})
+    if not breakdown:
+        return
+    print("  --- Reward Breakdown ---")
+    total = 0.0
+    # Sort: positives first (descending), then negatives (ascending)
+    items = sorted(breakdown.items(), key=lambda kv: (-kv[1], kv[0]))
+    for key, val in items:
+        if abs(val) < 0.0005:
+            continue  # skip zero entries
+        marker = "+" if val > 0 else " "
+        print(f"    {key:<24} {marker}{val:>8.3f}")
+        total += val
+    print(f"    {'─' * 35}")
+    marker = "+" if total > 0 else " "
+    print(f"    {'TOTAL':<24} {marker}{total:>8.3f}")
     print()
 
 
@@ -248,6 +276,8 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     wins = 0
     losses = 0
     draws = 0
+    prev_breakdown: dict[str, float] = {}  # track cumulative breakdown for delta computation
+    game_metrics = GameMetrics()  # behavioral accumulator
 
     # Track observation bounds across the entire game
     obs_global_min = obs.min()
@@ -340,7 +370,22 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
                   f"totalMoney={obs[12]:.3f} totalDmg={obs[13]:.3f} "
                   f"| raw gold~{obs[1]*300:.0f}g | min={obs.min():.3f} max={obs.max():.3f}")
 
-            # Print opponent team, then our board state for the upcoming turn
+            # Compute per-fight delta from cumulative breakdown
+            cumulative = info.get("rewardBreakdown", {})
+            fight_delta = {}
+            for key, val in cumulative.items():
+                delta = val - prev_breakdown.get(key, 0.0)
+                if abs(delta) >= 0.0005:
+                    fight_delta[key] = delta
+            prev_breakdown = dict(cumulative)
+
+            # Enhanced fight snapshot with behavioral metrics
+            snapshot = FightSnapshot(info, reward_delta=fight_delta)
+            game_metrics.add_fight(snapshot)
+            print(format_enhanced_fight_line(snapshot))
+
+            _print_reward_breakdown({"rewardBreakdown": fight_delta})
+
             _print_opponent(info)
             _print_board_state(info)
 
@@ -352,6 +397,9 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     final_stage = info.get("stage", "?")
     final_life = info.get("life", 0)
     final_level = info.get("level", "?")
+
+    # Record gold at death for behavioral flags
+    game_metrics.set_death(info.get("money", info.get("gold", 0)))
 
     print()
     print("=" * 60)
@@ -365,8 +413,26 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     print(f"  Total Reward:   {total_reward:+.3f}")
     print(f"  Fights:         {fights}  (W:{wins} / L:{losses} / D:{draws})")
 
+    # Full-game cumulative reward breakdown (includes placement reward)
+    print("  --- Full-Game Reward Breakdown ---")
+    _print_reward_breakdown(info)
+
+    # Behavioral flags
+    flags = game_metrics.generate_flags()
+    flag_str = format_flags(flags)
+    if flag_str:
+        print(flag_str)
+        print()
+
+    # Behavioral aggregate metrics
+    aggregates = game_metrics.compute_aggregate()
+    if aggregates:
+        print("  --- Behavioral Aggregates ---")
+        for key in sorted(aggregates):
+            print(f"    {key:<28} {aggregates[key]:>8.3f}")
+        print()
+
     # Observation bounds report
-    print()
     print("  --- Observation Bounds Report ---")
     print(f"  Global min:     {obs_global_min:.4f}  (env low=-1.0)")
     print(f"  Global max:     {obs_global_max:.4f}  (env high=2.0)")

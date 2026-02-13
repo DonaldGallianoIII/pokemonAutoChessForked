@@ -84,7 +84,6 @@ export const TOTAL_ACTIONS = 92
 export const REWARD_PER_WIN = 0.75
 export const REWARD_PER_LOSS = -0.5
 export const REWARD_PER_DRAW = 0.0
-export const REWARD_PER_KILL = -2.0 // penalty when agent dies
 // Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
 // Steep curve: big rewards for winning, brutal penalties for losing.
 // Only top-3 get positive reward; 4th is now punished (-3) to prevent coasting.
@@ -100,15 +99,62 @@ export const REWARD_PLACEMENT_TABLE: readonly number[] = [
   -23.0, // 8th
 ]
 
-// Shaped rewards (Phase 6)
+// Shaped rewards (Phase 6) — unchanged signals
 export const REWARD_INTEREST_BONUS = 0.05   // per interest gold earned (with board guard)
-export const REWARD_SYNERGY_THRESHOLD = 0.15 // per newly activated synergy threshold (reduced; sustained reward now carries the signal)
-export const REWARD_SYNERGY_SUSTAINED = 0.02  // base reward per tier reached, per synergy, per stage
-export const REWARD_SYNERGY_MULTI_BONUS = 0.2 // multiplier bonus per synergy at tier 2+ (stacking comps)
-export const REWARD_SYNERGY_MULTI_CAP = 1.6   // max multiplier (caps at 4 qualifying synergies)
 export const REWARD_PER_ENEMY_KILL = 0.02   // per enemy unit killed in combat
 export const REWARD_HP_SCALE = 0.005        // HP preservation bonus on win
 export const REWARD_PER_SURVIVE_ROUND = 0.12 // bonus for every alive player each round
+
+// ─── New: Depth-Based Synergy Reward (v1.2) ─────────────────────────
+// Rewards active synergies based on breakpoint depth, normalized by total breakpoints.
+// Splash/inactive synergies get nothing (no penalty either).
+export const SYNERGY_DEPTH_BASE = 0.10          // per-synergy: base × tier_hit × (tier_hit / max_tiers)
+export const SYNERGY_ACTIVE_COUNT_BONUS = 0.1   // multiplier bonus per active synergy on final total
+
+// ─── New: Gold Excess Penalty (v1.2) ────────────────────────────────
+// Gold above 50 earns no interest. Dead money is always wrong.
+// Quadratic: penalty = BASE_RATE × excess × (excess+1) / 2, capped at MAX.
+export const GOLD_EXCESS_GRACE = 55             // penalty starts above this
+export const GOLD_EXCESS_BASE_RATE = 0.015      // quadratic base rate
+export const GOLD_EXCESS_MAX_PENALTY = -10.0    // floor cap per fight
+
+// ─── New: Gold Pressure System (v1.2) ───────────────────────────────
+// Survival urgency. Holding gold when you're dying gets punished.
+// Lives = floor(HP / avgDamage). Tiers: 4+ SAFE, 3 MINOR, 2 MEDIUM, 1/0 ALERT.
+// Quadratic: penalty = tier.baseRate × overage × (overage+1) / 2, capped at MAX.
+export const GOLD_PRESSURE_AVG_DAMAGE: Record<string, number> = {
+  STAGE_5_10: 8,
+  STAGE_11_16: 12,
+  STAGE_17_22: 16,
+  STAGE_23_PLUS: 18
+}
+export const GOLD_PRESSURE_TIERS = {
+  SAFE:   { minLives: 4, baseRate: 0,     freeGold: Infinity },
+  MINOR:  { minLives: 3, baseRate: 0.005, freeGold: 50 },
+  MEDIUM: { minLives: 2, baseRate: 0.02,  freeGold: 30 },
+  ALERT:  { minLives: 1, baseRate: 0.03,  freeGold: 10 }
+} as const
+export const GOLD_PRESSURE_MAX_PENALTY = -10.0  // floor cap per fight
+
+// ─── New: Stage-Scaled Bench Dead-Weight (v1.2) ─────────────────────
+// Bench units not in evolution family with board units are dead weight.
+// No HP gate; scales by stage. Early game = free experimentation.
+export const BENCH_DEAD_WEIGHT_BY_STAGE: Record<string, number> = {
+  STAGE_1_10: 0,
+  STAGE_11_15: -0.02,
+  STAGE_16_20: -0.05,
+  STAGE_21_PLUS: -0.10
+}
+
+// ─── New: Board Unit Quality Penalty (v1.3) ─────────────────────────
+// Pressure the agent to upgrade or replace 1-star units as the game progresses.
+// Units contributing to an active synergy (at/above first breakpoint) get lighter penalty.
+export const UNIT_QUALITY_STAGES: Record<string, { withSynergy: number; withoutSynergy: number }> = {
+  STAGE_1_8:     { withSynergy: 0,     withoutSynergy: 0 },
+  STAGE_9_13:    { withSynergy: -0.01, withoutSynergy: -0.03 },
+  STAGE_14_18:   { withSynergy: -0.02, withoutSynergy: -0.06 },
+  STAGE_19_PLUS: { withSynergy: -0.05, withoutSynergy: -0.10 }
+}
 
 // Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
 // When false (default), 1 RL agent plays against 7 bots (Phase A curriculum training).
@@ -156,43 +202,9 @@ export const REWARD_BUY_EVOLUTION = 0.20     // buying 3rd copy (triggers evolut
 export const REWARD_BUY_DUPLICATE_LATEGAME = 0.12   // buying 2nd copy (stage 20+)
 export const REWARD_BUY_EVOLUTION_LATEGAME = 0.30    // buying 3rd copy (stage 20+)
 
-// Gold hoarding penalty: applied per excess gold above threshold at end of each stage.
-// Interest caps at 50g held; early game allows saving for levels, late game punishes harder.
-//
-// Before stage 21:  >70g → -0.04/gold
-// After stage 21 (tiered):
-//   >50g → -0.01/gold,  >60g → -0.04/gold,  >70g → -0.07/gold
-export const GOLD_EXCESS_THRESHOLD = 70
-export const REWARD_GOLD_EXCESS_PENALTY = -0.08       // per gold above 70 (early game) — doubled, no reason to ever hold 70+
-export const GOLD_LATEGAME_STAGE = 21                  // stage at which stricter tiers kick in
-export const GOLD_LATEGAME_TIER1_THRESHOLD = 50        // >50g
-export const REWARD_GOLD_LATEGAME_TIER1 = -0.01        // per gold above 50
-export const GOLD_LATEGAME_TIER2_THRESHOLD = 60        // >60g
-export const REWARD_GOLD_LATEGAME_TIER2 = -0.04        // per gold above 60
-export const REWARD_GOLD_LATEGAME_TIER3 = -0.14        // per gold above 70 — doubled, never acceptable
-
-// Low-gold penalty: teaches the agent to save toward interest thresholds.
-// Before stage 5: no penalty. Then the minimum gold target ramps up:
-//   stage 5+ → 10g,  stage 8+ → 20g,  stage 12+ → 30g,
-//   stage 15+ → 40g, stage 19+ → 50g
-// Penalty is per gold below the target for the current stage.
-export const GOLD_MIN_TARGETS: [number, number][] = [
-  [19, 50],  // stage 19+: save to 50g (full interest)
-  [15, 40],  // stage 15+: save to 40g
-  [12, 30],  // stage 12+: save to 30g
-  [8, 20],   // stage  8+: save to 20g
-  [5, 10],   // stage  5+: save to 10g
-]
-export const REWARD_GOLD_LOW_PENALTY = -0.01           // per gold below target
-
-// Critical HP gold penalty: when below this HP threshold, ALL held gold is punished.
-// "Spend or die" — sitting on gold at low HP is suicidal, force the agent to invest.
-export const GOLD_CRITICAL_HP_THRESHOLD = 20
-export const REWARD_GOLD_CRITICAL_HP = -0.1             // per gold held when HP < threshold
-
-// Dead-weight bench penalty: when HP < 20, bench units not in the same evolution family
-// as any board unit are dead weight — sell them and spend the gold.
-export const REWARD_BENCH_DEAD_WEIGHT = -0.2            // per non-matching bench unit when HP < threshold
+// (Old gold hoarding, low-gold, critical HP, and dead-weight bench constants
+//  removed in v1.2 rework — replaced by Gold Excess, Gold Pressure, and
+//  Stage-Scaled Bench Dead-Weight systems defined above.)
 
 // ─── Phase 0: Grid & Helper Constants ────────────────────────────────
 

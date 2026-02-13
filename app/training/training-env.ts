@@ -75,24 +75,19 @@ import {
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
-  GOLD_EXCESS_THRESHOLD,
-  GOLD_LATEGAME_STAGE,
-  GOLD_LATEGAME_TIER1_THRESHOLD,
-  GOLD_LATEGAME_TIER2_THRESHOLD,
-  GOLD_CRITICAL_HP_THRESHOLD,
-  GOLD_MIN_TARGETS,
-  REWARD_BENCH_DEAD_WEIGHT,
+  BENCH_DEAD_WEIGHT_BY_STAGE,
+  UNIT_QUALITY_STAGES,
+  GOLD_EXCESS_BASE_RATE,
+  GOLD_EXCESS_GRACE,
+  GOLD_EXCESS_MAX_PENALTY,
+  GOLD_PRESSURE_AVG_DAMAGE,
+  GOLD_PRESSURE_MAX_PENALTY,
+  GOLD_PRESSURE_TIERS,
   REWARD_BENCH_PENALTY,
   REWARD_BUY_DUPLICATE,
   REWARD_BUY_DUPLICATE_LATEGAME,
   REWARD_BUY_EVOLUTION,
   REWARD_BUY_EVOLUTION_LATEGAME,
-  REWARD_GOLD_EXCESS_PENALTY,
-  REWARD_GOLD_LATEGAME_TIER1,
-  REWARD_GOLD_LATEGAME_TIER2,
-  REWARD_GOLD_LATEGAME_TIER3,
-  REWARD_GOLD_CRITICAL_HP,
-  REWARD_GOLD_LOW_PENALTY,
   REWARD_LEVEL_UP,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
@@ -105,15 +100,12 @@ import {
   REWARD_BUY_THEN_SELL,
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
-  REWARD_PER_KILL,
   REWARD_PER_LOSS,
   REWARD_PER_SURVIVE_ROUND,
   REWARD_PER_WIN,
   REWARD_PLACEMENT_TABLE,
-  REWARD_SYNERGY_THRESHOLD,
-  REWARD_SYNERGY_SUSTAINED,
-  REWARD_SYNERGY_MULTI_BONUS,
-  REWARD_SYNERGY_MULTI_CAP,
+  SYNERGY_ACTIVE_COUNT_BONUS,
+  SYNERGY_DEPTH_BASE,
   SELF_PLAY,
   TOTAL_ACTIONS,
   TOTAL_OBS_SIZE,
@@ -161,6 +153,13 @@ export interface StepResult {
       level: number
       board: { name: string; x: number; y: number; stars: number; items: string[] }[]
     } | null
+    rewardBreakdown: Record<string, number>
+    // Behavioral metrics for eval/replay diagnostics
+    benchDeadWeightCount: number
+    buyCount: number
+    sellCount: number
+    rerollCount: number
+    goldSpent: number
   }
 }
 
@@ -178,7 +177,16 @@ export class TrainingEnv {
   lockShopUsedThisTurn = false  // prevent LOCK_SHOP spam (toggle once per turn max)
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
-  prevActiveSynergyCount = 0
+  // prevActiveSynergyCount removed in v1.2 (synergy delta replaced by depth-based reward)
+  // Per-turn reward breakdown: accumulates named reward signals for debugging/replay
+  rewardBreakdown: Record<string, number> = {}
+  // Per-turn behavioral counters (reset each turn)
+  turnBuyCount = 0
+  turnSellCount = 0
+  turnRerollCount = 0
+  turnGoldAtStart = 0
+  // Per-fight dead-weight count (computed during fight phase)
+  lastBenchDeadWeightCount = 0
   cachedBots: IBot[] = []
   botSynergies = new Map<string, Synergy>() // each dummy bot's team synergy theme
   additionalUncommonPool: Pkm[] = []
@@ -321,7 +329,13 @@ export class TrainingEnv {
     this.lockShopUsedThisTurn = false
     this.totalSteps = 0
     this.lastBattleResult = null
-    this.prevActiveSynergyCount = 0
+    // prevActiveSynergyCount removed in v1.2
+    this.rewardBreakdown = {}
+    this.turnBuyCount = 0
+    this.turnSellCount = 0
+    this.turnRerollCount = 0
+    this.turnGoldAtStart = 0
+    this.lastBenchDeadWeightCount = 0
     this.positionGridCache.clear()
     this.positionGridDirty.clear()
     this.itemPairCache.clear()
@@ -353,9 +367,10 @@ export class TrainingEnv {
 
     const agent = this.state.players.get(this.agentId)
     if (!agent || !agent.alive) {
+      // No elimination penalty — placement table already handles this
       return {
         observation: this.getObservation(),
-        reward: REWARD_PER_KILL,
+        reward: 0,
         done: true,
         info: this.getInfo()
       }
@@ -388,10 +403,13 @@ export class TrainingEnv {
       // Check pre-buy count: 1 existing = 2nd copy, 2 existing = 3rd copy (evolution!)
       // After stage 20, boost rewards to encourage spending gold on upgrades.
       const lateGame = this.state.stageLevel > 20
+      if (isBuy && actionExecuted) this.turnBuyCount++
       if (isBuy && actionExecuted && preBuyCopies >= 2) {
-        reward += lateGame ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION
+        const r = lateGame ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION
+        reward += r; this.trackReward("buyEvolution", r)
       } else if (isBuy && actionExecuted && preBuyCopies === 1) {
-        reward += lateGame ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE
+        const r = lateGame ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE
+        reward += r; this.trackReward("buyDuplicate", r)
       }
 
       // Move fidget penalty: 2 free moves, then penalty per consecutive move
@@ -402,7 +420,7 @@ export class TrainingEnv {
         this.lastMoveCell = moveCell
         this.consecutiveMoves++
         if (this.consecutiveMoves > MOVE_FIDGET_GRACE) {
-          reward += REWARD_MOVE_FIDGET
+          reward += REWARD_MOVE_FIDGET; this.trackReward("moveFidget", REWARD_MOVE_FIDGET)
         }
       } else if (isMove && !actionExecuted) {
         // Failed move still counts as consecutive
@@ -415,18 +433,17 @@ export class TrainingEnv {
       // Sell penalty: penalize selling evolved (2+ star) units
       const isSell = action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31
       if (isSell && actionExecuted) {
-        // Check if the unit that was just sold had 2+ stars
-        // (unit is gone now, but we can check from pre-sell snapshot)
-        // We'll detect this from the sell action itself
-        reward += this.lastSoldStars >= 2 ? REWARD_SELL_EVOLVED : 0
+        this.turnSellCount++
+        if (this.lastSoldStars >= 2) {
+          reward += REWARD_SELL_EVOLVED; this.trackReward("sellEvolved", REWARD_SELL_EVOLVED)
+        }
 
-        // Buy-then-immediately-sell penalty: buying a unit and selling it as the
-        // very next action is pure gold waste. Use REMOVE_SHOP instead.
+        // Buy-then-immediately-sell penalty
         if (this.lastActionWasBuy && this.lastBoughtName && this.lastSoldName) {
           const soldIndex = getPokemonData(this.lastSoldName as any)?.index
           const boughtIndex = getPokemonData(this.lastBoughtName as any)?.index
           if (soldIndex && boughtIndex && soldIndex === boughtIndex) {
-            reward += REWARD_BUY_THEN_SELL
+            reward += REWARD_BUY_THEN_SELL; this.trackReward("buyThenSell", REWARD_BUY_THEN_SELL)
           }
         }
       }
@@ -441,30 +458,33 @@ export class TrainingEnv {
       }
 
       // Level-up reward: only when board is reasonably filled
-      // Prevents "level to 9 with 3 units" — no reward if more than 2 slots empty
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
         const maxTeamSize = getMaxTeamSize(
           agent.experienceManager.level,
           this.state.specialGameRule
         )
         if (agent.boardSize >= maxTeamSize - 2) {
-          reward += REWARD_LEVEL_UP
+          reward += REWARD_LEVEL_UP; this.trackReward("levelUp", REWARD_LEVEL_UP)
         }
       }
 
       // Reroll reward: unconditional incentive to refresh shop (boosted late game)
       if (action === TrainingAction.REFRESH && actionExecuted) {
-        reward += lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
+        this.turnRerollCount++
+        const r = lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
+        reward += r; this.trackReward("reroll", r)
       }
 
       // Per-step bonus for keeping unique/legendary units on board
+      let keepBonus = 0
       agent.board.forEach((pokemon) => {
         if (pokemon.positionY > 0) {
           const rarity = getPokemonData(pokemon.name).rarity
-          if (rarity === Rarity.UNIQUE) reward += REWARD_KEEP_UNIQUE
-          else if (rarity === Rarity.LEGENDARY) reward += REWARD_KEEP_LEGENDARY
+          if (rarity === Rarity.UNIQUE) { reward += REWARD_KEEP_UNIQUE; keepBonus += REWARD_KEEP_UNIQUE }
+          else if (rarity === Rarity.LEGENDARY) { reward += REWARD_KEEP_LEGENDARY; keepBonus += REWARD_KEEP_LEGENDARY }
         }
       })
+      if (keepBonus !== 0) this.trackReward("keepUniqueLegendary", keepBonus)
 
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
@@ -525,7 +545,8 @@ export class TrainingEnv {
             if (benchCount > 0) {
               const openSlots = maxTeamSize - agent.boardSize
               const penaltyUnits = Math.min(benchCount, openSlots)
-              reward += penaltyUnits * REWARD_BENCH_PENALTY
+              const r = penaltyUnits * REWARD_BENCH_PENALTY
+              reward += r; this.trackReward("benchOpenSlots", r)
             }
           }
         }
@@ -553,6 +574,14 @@ export class TrainingEnv {
         this.consecutiveMoves = 0
         this.lastMoveCell = -1
         this.lockShopUsedThisTurn = false
+        // Note: rewardBreakdown accumulates across the whole game (not reset per turn)
+        // so that the terminal info dict contains full-game totals.
+        // Reset per-turn behavioral counters for the new turn
+        const agentNow = this.state.players.get(this.agentId)
+        this.turnBuyCount = 0
+        this.turnSellCount = 0
+        this.turnRerollCount = 0
+        this.turnGoldAtStart = agentNow?.money ?? 0
       }
     }
 
@@ -1249,8 +1278,6 @@ export class TrainingEnv {
     }
 
     // Issue #2: Compute per-player rewards so ALL players get their combat reward.
-    // In single-agent mode only the agent's reward matters, but we compute for all
-    // to support self-play where all 8 players need rewards attributed correctly.
     const rewards = new Map<string, number>()
     this.state.players.forEach((player, id) => {
       if (!player.alive) {
@@ -1260,13 +1287,12 @@ export class TrainingEnv {
       const lastHistory = player.history.at(-1)
       if (lastHistory) {
         const result = lastHistory.result as BattleResult
-        if (result === BattleResult.WIN) {
-          rewards.set(id, REWARD_PER_WIN)
-        } else if (result === BattleResult.DEFEAT) {
-          rewards.set(id, REWARD_PER_LOSS)
-        } else {
-          rewards.set(id, REWARD_PER_DRAW)
-        }
+        let r: number
+        if (result === BattleResult.WIN) { r = REWARD_PER_WIN }
+        else if (result === BattleResult.DEFEAT) { r = REWARD_PER_LOSS }
+        else { r = REWARD_PER_DRAW }
+        rewards.set(id, r)
+        if (id === this.agentId) this.trackReward("battleResult", r)
       } else {
         rewards.set(id, 0)
       }
@@ -1276,37 +1302,37 @@ export class TrainingEnv {
     this.state.players.forEach((player, id) => {
       if (!player.alive) return
       rewards.set(id, (rewards.get(id) ?? 0) + REWARD_PER_SURVIVE_ROUND)
+      if (id === this.agentId) this.trackReward("survivalBonus", REWARD_PER_SURVIVE_ROUND)
     })
 
-    // ── Shaped rewards (Phase 6) ──────────────────────────────────────
+    // ── Shaped rewards (Phase 6, v1.2 rework) ────────────────────────
 
-    // 6.2: Synergy activation delta — reward positive synergy growth
+    // 6.2: Depth-Based Synergy Reward — reward active synergies by breakpoint depth,
+    // normalized by total breakpoints. Splash/inactive get nothing.
+    // Formula: per synergy = SYNERGY_DEPTH_BASE × tier_hit × (tier_hit / max_tiers)
+    // Final: sum × (1 + SYNERGY_ACTIVE_COUNT_BONUS × active_count)
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
-      const currentThresholds = this.countActiveSynergyThresholds(player)
-      if (id === this.agentId) {
-        const delta = currentThresholds - this.prevActiveSynergyCount
-        if (delta > 0) {
-          rewards.set(id, (rewards.get(id) ?? 0) + delta * REWARD_SYNERGY_THRESHOLD)
+      let rawSum = 0
+      let activeCount = 0
+      player.synergies.forEach((value, synergy) => {
+        const triggers = SynergyTriggers[synergy as Synergy]
+        if (!triggers || triggers.length === 0) return
+        let tierHit = 0
+        for (const threshold of triggers) {
+          if (value >= threshold) tierHit++
+          else break
         }
-      }
-    })
-
-    // 6.2b: Sustained synergy reward — ongoing bonus for maintaining strong comps.
-    // Uses real SynergyTriggers breakpoints per synergy type. Higher tiers and
-    // stacking multiple synergies at tier 2+ earn a multiplicative bonus.
-    this.state.players.forEach((player, id) => {
-      if (!player.alive || player.isBot) return
-      if (id === this.agentId) {
-        const { totalTiers, qualifyingCount } = this.computeSynergyTierInfo(player)
-        if (totalTiers > 0) {
-          const basePoints = totalTiers * REWARD_SYNERGY_SUSTAINED
-          const multiplier = Math.min(
-            1.0 + qualifyingCount * REWARD_SYNERGY_MULTI_BONUS,
-            REWARD_SYNERGY_MULTI_CAP
-          )
-          rewards.set(id, (rewards.get(id) ?? 0) + basePoints * multiplier)
+        if (tierHit > 0) {
+          activeCount++
+          const maxTiers = triggers.length
+          rawSum += SYNERGY_DEPTH_BASE * tierHit * (tierHit / maxTiers)
         }
+      })
+      if (rawSum > 0) {
+        const total = rawSum * (1 + SYNERGY_ACTIVE_COUNT_BONUS * activeCount)
+        rewards.set(id, (rewards.get(id) ?? 0) + total)
+        if (id === this.agentId) this.trackReward("synergyDepth", total)
       }
     })
 
@@ -1315,7 +1341,9 @@ export class TrainingEnv {
       if (!player.alive || player.isBot) return
       const kills = enemyKills.get(id) ?? 0
       if (kills > 0) {
-        rewards.set(id, (rewards.get(id) ?? 0) + kills * REWARD_PER_ENEMY_KILL)
+        const r = kills * REWARD_PER_ENEMY_KILL
+        rewards.set(id, (rewards.get(id) ?? 0) + r)
+        if (id === this.agentId) this.trackReward("enemyKills", r)
       }
     })
 
@@ -1324,86 +1352,128 @@ export class TrainingEnv {
       if (!player.alive || player.isBot) return
       const lastHistory = player.history.at(-1)
       if (lastHistory?.result === BattleResult.WIN) {
-        rewards.set(id, (rewards.get(id) ?? 0) + (player.life / 100) * REWARD_HP_SCALE)
+        const r = (player.life / 100) * REWARD_HP_SCALE
+        rewards.set(id, (rewards.get(id) ?? 0) + r)
+        if (id === this.agentId) this.trackReward("hpPreservation", r)
       }
     })
 
-    // 6.5: Gold hoarding penalty — discourage holding gold beyond interest cap.
-    // Before stage 21: flat -0.04 per gold above 70.
-    // After stage 21 (tiered): >50g -0.01, >60g -0.04, >70g -0.07 per gold in each bracket.
-    // Applied before income so it reflects the agent's spending decisions.
+    // 6.5: Gold Excess Penalty — dead gold above 55 is always wrong.
+    // Quadratic: penalty = BASE_RATE × excess × (excess+1) / 2, capped at MAX.
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
-      const gold = player.money
-      let penalty = 0
-      if (this.state.stageLevel >= GOLD_LATEGAME_STAGE) {
-        // Late game: tiered brackets (each tier only penalizes gold within its range)
-        if (gold > GOLD_EXCESS_THRESHOLD) {
-          penalty += (gold - GOLD_EXCESS_THRESHOLD) * REWARD_GOLD_LATEGAME_TIER3
-        }
-        if (gold > GOLD_LATEGAME_TIER2_THRESHOLD) {
-          penalty += (Math.min(gold, GOLD_EXCESS_THRESHOLD) - GOLD_LATEGAME_TIER2_THRESHOLD) * REWARD_GOLD_LATEGAME_TIER2
-        }
-        if (gold > GOLD_LATEGAME_TIER1_THRESHOLD) {
-          penalty += (Math.min(gold, GOLD_LATEGAME_TIER2_THRESHOLD) - GOLD_LATEGAME_TIER1_THRESHOLD) * REWARD_GOLD_LATEGAME_TIER1
-        }
-      } else {
-        // Early game: flat penalty above 70
-        if (gold > GOLD_EXCESS_THRESHOLD) {
-          penalty += (gold - GOLD_EXCESS_THRESHOLD) * REWARD_GOLD_EXCESS_PENALTY
-        }
-      }
-      if (penalty < 0) {
+      const excess = Math.max(0, player.money - GOLD_EXCESS_GRACE)
+      if (excess > 0) {
+        const raw = GOLD_EXCESS_BASE_RATE * excess * (excess + 1) / 2
+        const penalty = Math.max(-raw, GOLD_EXCESS_MAX_PENALTY)
         rewards.set(id, (rewards.get(id) ?? 0) + penalty)
+        if (id === this.agentId) this.trackReward("goldExcess", penalty)
       }
     })
 
-    // 6.6: Low-gold penalty — teach the agent to save toward interest thresholds.
-    // The minimum gold target ramps up with stage progression (no penalty before stage 5).
+    // 6.6: Gold Pressure System — survival urgency, HP-aware.
+    // Lives = floor(HP / avgDamage). Tiers: 4+ SAFE, 3 MINOR, 2 MEDIUM, 1/0 ALERT.
+    // Quadratic: penalty = tier.baseRate × overage × (overage+1) / 2, capped at MAX.
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
-      const target = GOLD_MIN_TARGETS.find(
-        ([stage]) => this.state.stageLevel >= stage
-      )
-      if (target) {
-        const deficit = target[1] - player.money
-        if (deficit > 0) {
-          rewards.set(id, (rewards.get(id) ?? 0) + deficit * REWARD_GOLD_LOW_PENALTY)
+      const stage = this.state.stageLevel
+      // Lookup average damage by stage range
+      let avgDamage: number
+      if (stage >= 23)      avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_23_PLUS
+      else if (stage >= 17) avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_17_22
+      else if (stage >= 11) avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_11_16
+      else if (stage >= 5)  avgDamage = GOLD_PRESSURE_AVG_DAMAGE.STAGE_5_10
+      else return // stages 1-4: no pressure
+
+      const livesRemaining = Math.floor(player.life / avgDamage)
+
+      // Determine tier
+      let tier: typeof GOLD_PRESSURE_TIERS[keyof typeof GOLD_PRESSURE_TIERS]
+      if (livesRemaining >= 4) tier = GOLD_PRESSURE_TIERS.SAFE
+      else if (livesRemaining === 3) tier = GOLD_PRESSURE_TIERS.MINOR
+      else if (livesRemaining === 2) tier = GOLD_PRESSURE_TIERS.MEDIUM
+      else tier = GOLD_PRESSURE_TIERS.ALERT // 1 or 0
+
+      if (tier.baseRate <= 0) return // SAFE tier, no penalty
+
+      const overage = Math.max(0, player.money - tier.freeGold)
+      if (overage > 0) {
+        const raw = tier.baseRate * overage * (overage + 1) / 2
+        const penalty = Math.max(-raw, GOLD_PRESSURE_MAX_PENALTY)
+        rewards.set(id, (rewards.get(id) ?? 0) + penalty)
+        if (id === this.agentId) this.trackReward("goldPressure", penalty)
+      }
+    })
+
+    // 6.7: Stage-Scaled Bench Dead-Weight — bench units not in evolution family
+    // with board units are dead weight. No HP gate; scales by stage.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const stage = this.state.stageLevel
+      let penaltyRate: number
+      if (stage >= 21)      penaltyRate = BENCH_DEAD_WEIGHT_BY_STAGE.STAGE_21_PLUS
+      else if (stage >= 16) penaltyRate = BENCH_DEAD_WEIGHT_BY_STAGE.STAGE_16_20
+      else if (stage >= 11) penaltyRate = BENCH_DEAD_WEIGHT_BY_STAGE.STAGE_11_15
+      else                  penaltyRate = BENCH_DEAD_WEIGHT_BY_STAGE.STAGE_1_10
+
+      if (penaltyRate >= 0) return // stages 1-10: no penalty
+
+      // Collect families of all board units (y > 0)
+      const boardFamilies = new Set<Pkm>()
+      player.board.forEach((p) => {
+        if (p.positionY > 0) {
+          boardFamilies.add(PkmFamily[p.name])
         }
-      }
-    })
-
-    // 6.7: Critical HP gold penalty — when HP < 20, punish ALL held gold at -0.1/gold.
-    // "Spend or die": sitting on gold while about to be eliminated is suicidal.
-    this.state.players.forEach((player, id) => {
-      if (!player.alive || player.isBot) return
-      if (player.life > 0 && player.life < GOLD_CRITICAL_HP_THRESHOLD && player.money > 0) {
-        rewards.set(id, (rewards.get(id) ?? 0) + player.money * REWARD_GOLD_CRITICAL_HP)
-      }
-    })
-
-    // 6.8: Dead-weight bench penalty — when HP < 20, penalize bench units that don't
-    // share an evolution family with any board unit. These are dead weight: sell them.
-    this.state.players.forEach((player, id) => {
-      if (!player.alive || player.isBot) return
-      if (player.life > 0 && player.life < GOLD_CRITICAL_HP_THRESHOLD) {
-        // Collect families of all board units (y > 0)
-        const boardFamilies = new Set<Pkm>()
-        player.board.forEach((p) => {
-          if (p.positionY > 0) {
-            boardFamilies.add(PkmFamily[p.name])
-          }
-        })
-        // Penalize each bench unit whose family isn't on the board
-        let deadWeight = 0
-        player.board.forEach((p) => {
-          if (p.positionY === 0 && !boardFamilies.has(PkmFamily[p.name])) {
-            deadWeight++
-          }
-        })
-        if (deadWeight > 0) {
-          rewards.set(id, (rewards.get(id) ?? 0) + deadWeight * REWARD_BENCH_DEAD_WEIGHT)
+      })
+      // Penalize each bench unit whose family isn't on the board
+      let deadWeight = 0
+      player.board.forEach((p) => {
+        if (p.positionY === 0 && !boardFamilies.has(PkmFamily[p.name])) {
+          deadWeight++
         }
+      })
+      if (id === this.agentId) this.lastBenchDeadWeightCount = deadWeight
+      if (deadWeight > 0) {
+        const r = deadWeight * penaltyRate
+        rewards.set(id, (rewards.get(id) ?? 0) + r)
+        if (id === this.agentId) this.trackReward("benchDeadWeight", r)
+      }
+    })
+
+    // 6.8: Board Unit Quality Penalty — pressure to upgrade/replace 1-star units.
+    // Units contributing to an active synergy get lighter penalty.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      const stage = this.state.stageLevel
+      let rates: typeof UNIT_QUALITY_STAGES[string]
+      if (stage >= 19)      rates = UNIT_QUALITY_STAGES.STAGE_19_PLUS
+      else if (stage >= 14) rates = UNIT_QUALITY_STAGES.STAGE_14_18
+      else if (stage >= 9)  rates = UNIT_QUALITY_STAGES.STAGE_9_13
+      else                  rates = UNIT_QUALITY_STAGES.STAGE_1_8
+
+      if (rates.withSynergy >= 0 && rates.withoutSynergy >= 0) return // stages 1-8: no penalty
+
+      // Build set of synergies that have reached their first breakpoint
+      const activeSynergies = new Set<Synergy>()
+      player.synergies.forEach((value, synergy) => {
+        const triggers = SynergyTriggers[synergy as Synergy]
+        if (triggers && triggers.length > 0 && value >= triggers[0]) {
+          activeSynergies.add(synergy as Synergy)
+        }
+      })
+
+      let totalPenalty = 0
+      player.board.forEach((p) => {
+        if (p.positionY > 0 && p.stars === 1) {
+          // Check if this unit contributes to any active synergy
+          const data = getPokemonData(p.name)
+          const hasActiveSynergy = data.types.some((t: Synergy) => activeSynergies.has(t))
+          totalPenalty += hasActiveSynergy ? rates.withSynergy : rates.withoutSynergy
+        }
+      })
+      if (totalPenalty < 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + totalPenalty)
+        if (id === this.agentId) this.trackReward("unitQuality", totalPenalty)
       }
     })
 
@@ -1466,10 +1536,9 @@ export class TrainingEnv {
             this.state.specialGameRule
           )
           if (player.boardSize >= maxTeam - 2) {
-            rewards.set(
-              player.id,
-              (rewards.get(player.id) ?? 0) + player.interest * REWARD_INTEREST_BONUS
-            )
+            const r = player.interest * REWARD_INTEREST_BONUS
+            rewards.set(player.id, (rewards.get(player.id) ?? 0) + r)
+            if (player.id === this.agentId) this.trackReward("interestBonus", r)
           }
         }
       })
@@ -1606,11 +1675,7 @@ export class TrainingEnv {
       this.invalidatePlayerCaches(id)
     })
 
-    // Snapshot synergy count at start of pick phase for delta reward (6.2)
-    const agentForSynergy = this.state.players.get(this.agentId)
-    if (agentForSynergy) {
-      this.prevActiveSynergyCount = this.countActiveSynergyThresholds(agentForSynergy)
-    }
+    // (Synergy delta snapshot removed in v1.2 — depth-based reward doesn't need it)
   }
 
   /**
@@ -2319,50 +2384,20 @@ export class TrainingEnv {
     return pairs
   }
 
-  /**
-   * Count how many synergies have reached their first activation threshold.
-   * Used for delta-based synergy reward shaping.
-   */
-  private countActiveSynergyThresholds(player: Player): number {
-    let count = 0
-    player.synergies.forEach((value, synergy) => {
-      const triggers = SynergyTriggers[synergy as Synergy]
-      if (triggers && triggers.length > 0 && value >= triggers[0]) {
-        count++
-      }
-    })
-    return count
-  }
+  // (countActiveSynergyThresholds and computeSynergyTierInfo removed in v1.2 —
+  //  replaced by inline depth-based synergy calculation in runFightPhase)
 
-  /**
-   * Compute detailed synergy tier info using real SynergyTriggers breakpoints.
-   * Returns { totalTiers, qualifyingCount } where:
-   *   totalTiers  = sum of tier levels reached across all synergies
-   *   qualifyingCount = number of synergies at tier 2+
-   */
-  private computeSynergyTierInfo(player: Player): { totalTiers: number; qualifyingCount: number } {
-    let totalTiers = 0
-    let qualifyingCount = 0
-    player.synergies.forEach((value, synergy) => {
-      const triggers = SynergyTriggers[synergy as Synergy]
-      if (!triggers || triggers.length === 0) return
-      let tierReached = 0
-      for (const threshold of triggers) {
-        if (value >= threshold) tierReached++
-        else break
-      }
-      if (tierReached > 0) {
-        totalTiers += tierReached
-        if (tierReached >= 2) qualifyingCount++
-      }
-    })
-    return { totalTiers, qualifyingCount }
+  /** Accumulate a named reward signal into the per-turn breakdown. */
+  private trackReward(key: string, value: number): void {
+    this.rewardBreakdown[key] = (this.rewardBreakdown[key] ?? 0) + value
   }
 
   private computeFinalReward(agent: Player): number {
     // Reward based on final placement: rank 1 = best, rank 8 = worst
     const idx = Math.max(0, Math.min(agent.rank - 1, REWARD_PLACEMENT_TABLE.length - 1))
-    return REWARD_PLACEMENT_TABLE[idx]
+    const r = REWARD_PLACEMENT_TABLE[idx]
+    this.trackReward("placement", r)
+    return r
   }
 
   private getInfo(playerId?: string): StepResult["info"] {
@@ -2475,7 +2510,13 @@ export class TrainingEnv {
       bench: benchUnits,
       synergies: activeSynergies,
       items: heldItems,
-      opponent: opponentInfo
+      opponent: opponentInfo,
+      rewardBreakdown: { ...this.rewardBreakdown },
+      benchDeadWeightCount: this.lastBenchDeadWeightCount,
+      buyCount: this.turnBuyCount,
+      sellCount: this.turnSellCount,
+      rerollCount: this.turnRerollCount,
+      goldSpent: Math.max(0, this.turnGoldAtStart - (agent?.money ?? 0))
     }
   }
 
