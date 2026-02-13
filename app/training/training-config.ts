@@ -87,16 +87,17 @@ export const REWARD_PER_DRAW = 0.0
 export const REWARD_PER_KILL = -2.0 // penalty when agent dies
 // Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
 // Steep curve: big rewards for winning, brutal penalties for losing.
-// Only top-3 get positive reward; 4th is break-even, bottom-4 punished hard.
+// Only top-3 get positive reward; 4th is now punished (-3) to prevent coasting.
+// Bottom-4 shifted down by 3 accordingly. Total spread: 48 (25 to -23).
 export const REWARD_PLACEMENT_TABLE: readonly number[] = [
-  +20.0, // 1st
+  +25.0, // 1st
   +13.0, // 2nd
    +8.0, // 3rd
-    0.0, // 4th
-   -4.0, // 5th
-   -9.0, // 6th
-  -14.0, // 7th
-  -20.0, // 8th
+   -3.0, // 4th
+   -7.0, // 5th
+  -12.0, // 6th
+  -17.0, // 7th
+  -23.0, // 8th
 ]
 
 // Shaped rewards (Phase 6)
