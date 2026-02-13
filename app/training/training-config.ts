@@ -146,12 +146,17 @@ export const REWARD_INTEREST_BONUS = 0.12   // per interest gold earned (with bo
 export const REWARD_GOLD_STANDARD = 0.30    // flat bonus per round when gold >= 50 (with board guard)
 export const REWARD_PER_ENEMY_KILL = 0.02   // per enemy unit killed in combat
 export const REWARD_HP_SCALE = 0.005        // HP preservation bonus on win
-export const REWARD_PER_SURVIVE_ROUND = 0.12 // bonus for every alive player each round
+// REMOVED: REWARD_PER_SURVIVE_ROUND was +0.12/round = ~2.2 free reward per game.
+// Incentivized coasting (staying alive = good) instead of winning (placement reward
+// already handles this). Removed to reduce reward creep. Placement table is the
+// sole signal for "staying alive matters."
 
 // ─── New: Depth-Based Synergy Reward (v1.2) ─────────────────────────
 // Rewards active synergies based on breakpoint depth, normalized by total breakpoints.
 // Splash/inactive synergies get nothing (no penalty either).
-export const SYNERGY_DEPTH_BASE = 0.10          // per-synergy: base × tier_hit × (tier_hit / max_tiers)
+export const SYNERGY_DEPTH_BASE = 0.075         // per-synergy: base × tier_hit × (tier_hit / max_tiers)
+                                                 // v2: cut from 0.10 to 0.075 (reward creep fix — was accumulating
+                                                 // 9-18 total per game, enough to cancel a 6th-place penalty alone)
 export const SYNERGY_ACTIVE_COUNT_BONUS = 0.1   // multiplier bonus per active synergy on final total
 
 // ─── New: Gold Excess Penalty (v1.2) ────────────────────────────────
@@ -284,9 +289,12 @@ export const REWARD_EVO_FROM_REROLL: Record<string, number> = {
   SPECIAL:   1.00
 }
 
-// Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
-export const REWARD_KEEP_UNIQUE = 0.007
-export const REWARD_KEEP_LEGENDARY = 0.007
+// Per-ROUND bonus for keeping unique/legendary units on board (not bench, not sold).
+// v2: moved from per-step to per-round (was accumulating 2-4 total per game at
+// 0.007/step × ~270 steps). Now fires once per fight in runFightPhase().
+// Bumped to 0.08/unit/round to keep the signal meaningful.
+export const REWARD_KEEP_UNIQUE = 0.08
+export const REWARD_KEEP_LEGENDARY = 0.08
 
 // Reward for buying a unit whose species already exists on the board/bench (encourages evolutions)
 export const REWARD_BUY_DUPLICATE = 0.08     // buying 2nd copy

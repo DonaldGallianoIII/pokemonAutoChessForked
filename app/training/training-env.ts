@@ -110,7 +110,6 @@ import {
   REWARD_PER_DRAW,
   REWARD_PER_ENEMY_KILL,
   REWARD_PER_LOSS,
-  REWARD_PER_SURVIVE_ROUND,
   REWARD_PER_WIN,
   REWARD_PLACEMENT_TABLE,
   SYNERGY_ACTIVE_COUNT_BONUS,
@@ -551,16 +550,8 @@ export class TrainingEnv {
         reward += r; this.trackReward("reroll", r)
       }
 
-      // Per-step bonus for keeping unique/legendary units on board
-      let keepBonus = 0
-      agent.board.forEach((pokemon) => {
-        if (pokemon.positionY > 0) {
-          const rarity = getPokemonData(pokemon.name).rarity
-          if (rarity === Rarity.UNIQUE) { reward += REWARD_KEEP_UNIQUE; keepBonus += REWARD_KEEP_UNIQUE }
-          else if (rarity === Rarity.LEGENDARY) { reward += REWARD_KEEP_LEGENDARY; keepBonus += REWARD_KEEP_LEGENDARY }
-        }
-      })
-      if (keepBonus !== 0) this.trackReward("keepUniqueLegendary", keepBonus)
+      // NOTE: keepUniqueLegendary moved to per-round in runFightPhase() (was per-step,
+      // accumulating 2-4 reward per game from firing every action).
 
       // If agent just picked a proposition, check if we need to advance from stage 0
       if (
@@ -1393,12 +1384,8 @@ export class TrainingEnv {
       }
     })
 
-    // Survival bonus: every alive player gets a flat bonus each round
-    this.state.players.forEach((player, id) => {
-      if (!player.alive) return
-      rewards.set(id, (rewards.get(id) ?? 0) + REWARD_PER_SURVIVE_ROUND)
-      if (id === this.agentId) this.trackReward("survivalBonus", REWARD_PER_SURVIVE_ROUND)
-    })
+    // NOTE: REWARD_PER_SURVIVE_ROUND removed — was +0.12/round free reward that
+    // rewarded coasting. Placement table is the sole signal for survival value.
 
     // ── Shaped rewards (Phase 6, v1.2 rework) ────────────────────────
 
@@ -1439,6 +1426,24 @@ export class TrainingEnv {
         const r = kills * REWARD_PER_ENEMY_KILL
         rewards.set(id, (rewards.get(id) ?? 0) + r)
         if (id === this.agentId) this.trackReward("enemyKills", r)
+      }
+    })
+
+    // 6.3b: Keep unique/legendary bonus — per-round (not per-step).
+    // Incentivizes holding high-value units on the board, fired once per fight.
+    this.state.players.forEach((player, id) => {
+      if (!player.alive || player.isBot) return
+      let keepBonus = 0
+      player.board.forEach((pokemon) => {
+        if (pokemon.positionY > 0) {
+          const rarity = getPokemonData(pokemon.name).rarity
+          if (rarity === Rarity.UNIQUE) keepBonus += REWARD_KEEP_UNIQUE
+          else if (rarity === Rarity.LEGENDARY) keepBonus += REWARD_KEEP_LEGENDARY
+        }
+      })
+      if (keepBonus > 0) {
+        rewards.set(id, (rewards.get(id) ?? 0) + keepBonus)
+        if (id === this.agentId) this.trackReward("keepUniqueLegendary", keepBonus)
       }
     })
 
