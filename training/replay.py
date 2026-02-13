@@ -26,6 +26,13 @@ import time
 import numpy as np
 import requests
 
+from eval_metrics import (
+    FightSnapshot,
+    GameMetrics,
+    format_enhanced_fight_line,
+    format_flags,
+)
+
 
 # ---------------------------------------------------------------------------
 # Reward thresholds for fight-result inference.
@@ -270,6 +277,7 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     losses = 0
     draws = 0
     prev_breakdown: dict[str, float] = {}  # track cumulative breakdown for delta computation
+    game_metrics = GameMetrics()  # behavioral accumulator
 
     # Track observation bounds across the entire game
     obs_global_min = obs.min()
@@ -370,6 +378,12 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
                 if abs(delta) >= 0.0005:
                     fight_delta[key] = delta
             prev_breakdown = dict(cumulative)
+
+            # Enhanced fight snapshot with behavioral metrics
+            snapshot = FightSnapshot(info, reward_delta=fight_delta)
+            game_metrics.add_fight(snapshot)
+            print(format_enhanced_fight_line(snapshot))
+
             _print_reward_breakdown({"rewardBreakdown": fight_delta})
 
             _print_opponent(info)
@@ -383,6 +397,9 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     final_stage = info.get("stage", "?")
     final_life = info.get("life", 0)
     final_level = info.get("level", "?")
+
+    # Record gold at death for behavioral flags
+    game_metrics.set_death(info.get("money", info.get("gold", 0)))
 
     print()
     print("=" * 60)
@@ -400,8 +417,22 @@ def replay(model_path: str, server_url: str, deterministic: bool = True):
     print("  --- Full-Game Reward Breakdown ---")
     _print_reward_breakdown(info)
 
+    # Behavioral flags
+    flags = game_metrics.generate_flags()
+    flag_str = format_flags(flags)
+    if flag_str:
+        print(flag_str)
+        print()
+
+    # Behavioral aggregate metrics
+    aggregates = game_metrics.compute_aggregate()
+    if aggregates:
+        print("  --- Behavioral Aggregates ---")
+        for key in sorted(aggregates):
+            print(f"    {key:<28} {aggregates[key]:>8.3f}")
+        print()
+
     # Observation bounds report
-    print()
     print("  --- Observation Bounds Report ---")
     print(f"  Global min:     {obs_global_min:.4f}  (env low=-1.0)")
     print(f"  Global max:     {obs_global_max:.4f}  (env high=2.0)")

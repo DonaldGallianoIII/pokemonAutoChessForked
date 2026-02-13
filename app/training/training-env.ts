@@ -154,6 +154,12 @@ export interface StepResult {
       board: { name: string; x: number; y: number; stars: number; items: string[] }[]
     } | null
     rewardBreakdown: Record<string, number>
+    // Behavioral metrics for eval/replay diagnostics
+    benchDeadWeightCount: number
+    buyCount: number
+    sellCount: number
+    rerollCount: number
+    goldSpent: number
   }
 }
 
@@ -174,6 +180,13 @@ export class TrainingEnv {
   // prevActiveSynergyCount removed in v1.2 (synergy delta replaced by depth-based reward)
   // Per-turn reward breakdown: accumulates named reward signals for debugging/replay
   rewardBreakdown: Record<string, number> = {}
+  // Per-turn behavioral counters (reset each turn)
+  turnBuyCount = 0
+  turnSellCount = 0
+  turnRerollCount = 0
+  turnGoldAtStart = 0
+  // Per-fight dead-weight count (computed during fight phase)
+  lastBenchDeadWeightCount = 0
   cachedBots: IBot[] = []
   botSynergies = new Map<string, Synergy>() // each dummy bot's team synergy theme
   additionalUncommonPool: Pkm[] = []
@@ -318,6 +331,11 @@ export class TrainingEnv {
     this.lastBattleResult = null
     // prevActiveSynergyCount removed in v1.2
     this.rewardBreakdown = {}
+    this.turnBuyCount = 0
+    this.turnSellCount = 0
+    this.turnRerollCount = 0
+    this.turnGoldAtStart = 0
+    this.lastBenchDeadWeightCount = 0
     this.positionGridCache.clear()
     this.positionGridDirty.clear()
     this.itemPairCache.clear()
@@ -385,6 +403,7 @@ export class TrainingEnv {
       // Check pre-buy count: 1 existing = 2nd copy, 2 existing = 3rd copy (evolution!)
       // After stage 20, boost rewards to encourage spending gold on upgrades.
       const lateGame = this.state.stageLevel > 20
+      if (isBuy && actionExecuted) this.turnBuyCount++
       if (isBuy && actionExecuted && preBuyCopies >= 2) {
         const r = lateGame ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION
         reward += r; this.trackReward("buyEvolution", r)
@@ -414,6 +433,7 @@ export class TrainingEnv {
       // Sell penalty: penalize selling evolved (2+ star) units
       const isSell = action >= TrainingAction.SELL_0 && action <= TrainingAction.SELL_0 + 31
       if (isSell && actionExecuted) {
+        this.turnSellCount++
         if (this.lastSoldStars >= 2) {
           reward += REWARD_SELL_EVOLVED; this.trackReward("sellEvolved", REWARD_SELL_EVOLVED)
         }
@@ -450,6 +470,7 @@ export class TrainingEnv {
 
       // Reroll reward: unconditional incentive to refresh shop (boosted late game)
       if (action === TrainingAction.REFRESH && actionExecuted) {
+        this.turnRerollCount++
         const r = lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
         reward += r; this.trackReward("reroll", r)
       }
@@ -555,6 +576,12 @@ export class TrainingEnv {
         this.lockShopUsedThisTurn = false
         // Note: rewardBreakdown accumulates across the whole game (not reset per turn)
         // so that the terminal info dict contains full-game totals.
+        // Reset per-turn behavioral counters for the new turn
+        const agentNow = this.state.players.get(this.agentId)
+        this.turnBuyCount = 0
+        this.turnSellCount = 0
+        this.turnRerollCount = 0
+        this.turnGoldAtStart = agentNow?.money ?? 0
       }
     }
 
@@ -1405,6 +1432,7 @@ export class TrainingEnv {
           deadWeight++
         }
       })
+      if (id === this.agentId) this.lastBenchDeadWeightCount = deadWeight
       if (deadWeight > 0) {
         const r = deadWeight * penaltyRate
         rewards.set(id, (rewards.get(id) ?? 0) + r)
@@ -2483,7 +2511,12 @@ export class TrainingEnv {
       synergies: activeSynergies,
       items: heldItems,
       opponent: opponentInfo,
-      rewardBreakdown: { ...this.rewardBreakdown }
+      rewardBreakdown: { ...this.rewardBreakdown },
+      benchDeadWeightCount: this.lastBenchDeadWeightCount,
+      buyCount: this.turnBuyCount,
+      sellCount: this.turnSellCount,
+      rerollCount: this.turnRerollCount,
+      goldSpent: Math.max(0, this.turnGoldAtStart - (agent?.money ?? 0))
     }
   }
 

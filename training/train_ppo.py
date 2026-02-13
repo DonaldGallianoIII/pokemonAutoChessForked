@@ -42,99 +42,124 @@ from stable_baselines3.common.monitor import Monitor
 
 from launch_servers import SERVER_CMD, PROJECT_ROOT
 from pac_env import PokemonAutoChessEnv
+from eval_metrics import FightSnapshot, GameMetrics, format_flags
 
 
 class TrainingMetricsCallback(BaseCallback):
     """
     Logs custom training metrics to TensorBoard.
 
-    Tracks per-episode: reward, step count (game length), final rank, final stage.
+    Three tiers of metrics:
+    1. training/*   — core episode stats (reward, rank, stage, length)
+    2. reward/*     — per-signal reward breakdown (from rewardBreakdown in info)
+    3. behavior/*   — behavioral aggregates (gold patterns, star quality, synergies)
+    4. ratio/*      — balance ratios (shaped vs placement, positive vs negative)
+
     Game length is critical for detecting degenerate self-play equilibria:
     - Sudden drop → agents learned to suicide early
     - Sudden spike → agents are stalling / all-padding
     """
 
+    LOG_EVERY = 10  # log every N episodes
+
     def __init__(self, verbose=0):
         super().__init__(verbose)
-        self.episode_rewards = []
-        self.episode_lengths = []
-        self.episode_ranks = []
-        self.episode_stages = []
-        self.episode_gold = []
-        self.episode_board_size = []
-        self.episode_synergy_count = []
-        self.episode_items_held = []
+        self.episode_rewards: list[float] = []
+        self.episode_lengths: list[int] = []
+        self.episode_ranks: list[int] = []
+        self.episode_stages: list[int] = []
+        self.episode_gold: list[float] = []
+        self.episode_board_size: list[int] = []
+        self.episode_synergy_count: list[int] = []
+        self.episode_items_held: list[int] = []
         self._total_episodes = 0
 
+        # Per-signal reward breakdowns (last N episodes)
+        self._reward_breakdowns: list[dict[str, float]] = []
+        # Behavioral aggregates from GameMetrics (last N episodes)
+        self._behavior_aggregates: list[dict[str, float]] = []
+
     def _on_step(self) -> bool:
-        # Check for episode end
         infos = self.locals.get("infos", [])
         for info in infos:
-            if "episode" in info:
-                self.episode_rewards.append(info["episode"]["r"])
-                self.episode_lengths.append(info["episode"]["l"])
-                self._total_episodes += 1
+            if "episode" not in info:
+                continue
 
-                # Terminal step metrics — only logged at episode end
-                # so they reflect final game state, not intermediate steps
-                if "rank" in info:
-                    self.episode_ranks.append(info["rank"])
-                if "stage" in info:
-                    self.episode_stages.append(info["stage"])
-                if "gold" in info:
-                    self.episode_gold.append(info["gold"])
-                if "boardSize" in info:
-                    self.episode_board_size.append(info["boardSize"])
-                if "synergyCount" in info:
-                    self.episode_synergy_count.append(info["synergyCount"])
-                if "itemsHeld" in info:
-                    self.episode_items_held.append(info["itemsHeld"])
+            self.episode_rewards.append(info["episode"]["r"])
+            self.episode_lengths.append(info["episode"]["l"])
+            self._total_episodes += 1
 
-        # Log every 10 episodes
-        if len(self.episode_rewards) >= 10:
-            self.logger.record(
-                "training/mean_reward",
-                np.mean(self.episode_rewards[-10:]),
-            )
-            # Game length — watch for degenerate equilibria:
-            #   Healthy range: ~100-300 steps per game
-            #   <50  → agents dying too fast / suiciding
-            #   >500 → agents stalling / all-padding END_TURN
-            self.logger.record(
-                "training/mean_game_length",
-                np.mean(self.episode_lengths[-10:]),
-            )
-            if self.episode_ranks:
-                self.logger.record(
-                    "training/mean_rank",
-                    np.mean(self.episode_ranks[-10:]),
-                )
-            if self.episode_stages:
-                self.logger.record(
-                    "training/mean_final_stage",
-                    np.mean(self.episode_stages[-10:]),
-                )
-            if self.episode_gold:
-                self.logger.record(
-                    "training/mean_gold",
-                    np.mean(self.episode_gold[-10:]),
-                )
-            if self.episode_board_size:
-                self.logger.record(
-                    "training/mean_board_size",
-                    np.mean(self.episode_board_size[-10:]),
-                )
-            if self.episode_synergy_count:
-                self.logger.record(
-                    "training/synergy_count",
-                    np.mean(self.episode_synergy_count[-10:]),
-                )
-            if self.episode_items_held:
-                self.logger.record(
-                    "training/items_held",
-                    np.mean(self.episode_items_held[-10:]),
-                )
-            self.logger.record("training/total_episodes", self._total_episodes)
+            if "rank" in info:
+                self.episode_ranks.append(info["rank"])
+            if "stage" in info:
+                self.episode_stages.append(info["stage"])
+            if "gold" in info:
+                self.episode_gold.append(info["gold"])
+            if "boardSize" in info:
+                self.episode_board_size.append(info["boardSize"])
+            if "synergyCount" in info:
+                self.episode_synergy_count.append(info["synergyCount"])
+            if "itemsHeld" in info:
+                self.episode_items_held.append(info["itemsHeld"])
+
+            # Collect reward breakdown
+            bd = info.get("rewardBreakdown")
+            if bd:
+                self._reward_breakdowns.append(dict(bd))
+
+        # Log every N episodes
+        if len(self.episode_rewards) < self.LOG_EVERY:
+            return True
+
+        n = self.LOG_EVERY
+
+        # ── Core training stats ──────────────────────────────
+        self.logger.record("training/mean_reward", np.mean(self.episode_rewards[-n:]))
+        self.logger.record("training/mean_game_length", np.mean(self.episode_lengths[-n:]))
+        if self.episode_ranks:
+            self.logger.record("training/mean_rank", np.mean(self.episode_ranks[-n:]))
+        if self.episode_stages:
+            self.logger.record("training/mean_final_stage", np.mean(self.episode_stages[-n:]))
+        if self.episode_gold:
+            self.logger.record("training/mean_gold", np.mean(self.episode_gold[-n:]))
+        if self.episode_board_size:
+            self.logger.record("training/mean_board_size", np.mean(self.episode_board_size[-n:]))
+        if self.episode_synergy_count:
+            self.logger.record("training/synergy_count", np.mean(self.episode_synergy_count[-n:]))
+        if self.episode_items_held:
+            self.logger.record("training/items_held", np.mean(self.episode_items_held[-n:]))
+        self.logger.record("training/total_episodes", self._total_episodes)
+
+        # ── Per-signal reward breakdown ──────────────────────
+        if self._reward_breakdowns:
+            recent = self._reward_breakdowns[-n:]
+            all_keys = set(k for bd in recent for k in bd)
+            total_positive = 0.0
+            total_negative = 0.0
+            total_shaped = 0.0
+            placement_sum = 0.0
+
+            for key in sorted(all_keys):
+                vals = [bd.get(key, 0.0) for bd in recent]
+                mean_val = float(np.mean(vals))
+                self.logger.record(f"reward/{key}", mean_val)
+
+                # Accumulate for ratio computation
+                if mean_val > 0:
+                    total_positive += mean_val
+                else:
+                    total_negative += mean_val
+
+                if key == "placement":
+                    placement_sum = mean_val
+                else:
+                    total_shaped += mean_val
+
+            # ── Balance ratios ───────────────────────────────
+            if abs(placement_sum) > 0.01:
+                self.logger.record("ratio/shaped_vs_placement", total_shaped / abs(placement_sum))
+            if abs(total_negative) > 0.01:
+                self.logger.record("ratio/positive_vs_negative", total_positive / abs(total_negative))
 
         return True
 
@@ -341,38 +366,72 @@ def train(
 
 
 def evaluate(model_path: str, server_url: str, n_games: int = 20):
-    """Evaluate a trained model over multiple games."""
+    """Evaluate a trained model over multiple games with behavioral analysis."""
     env = make_env(server_url)
     model = MaskablePPO.load(model_path)
 
     ranks = []
     rewards = []
     stages = []
-    # Accumulate reward breakdown across all games (sum per signal)
     all_breakdowns: list[dict] = []
+    all_aggregates: list[dict] = []
+    all_flags: list[list[tuple[str, str]]] = []
 
     for i in range(n_games):
         obs, info = env.reset()
         total_reward = 0
         done = False
+        prev_breakdown: dict[str, float] = {}
+        game_metrics = GameMetrics()
+        prev_stage = info.get("stage", 1)
+        last_action = -1
 
         while not done:
             action_masks = env.unwrapped.action_masks()
             action, _ = model.predict(obs, deterministic=True, action_masks=action_masks)
+            action = int(action)
+            last_action = action
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
             done = terminated or truncated
 
-        ranks.append(info.get("rank", 8))
+            # After END_TURN, capture a fight snapshot
+            if action == 9:  # END_TURN
+                cumulative = info.get("rewardBreakdown", {})
+                fight_delta = {}
+                for key, val in cumulative.items():
+                    delta = val - prev_breakdown.get(key, 0.0)
+                    if abs(delta) >= 0.0005:
+                        fight_delta[key] = delta
+                prev_breakdown = dict(cumulative)
+
+                snapshot = FightSnapshot(info, reward_delta=fight_delta)
+                game_metrics.add_fight(snapshot)
+
+        # Game ended
+        game_metrics.set_death(info.get("money", info.get("gold", 0)))
+
+        rank = info.get("rank", 8)
+        stage = info.get("stage", 0)
+        ranks.append(rank)
         rewards.append(total_reward)
-        stages.append(info.get("stage", 0))
-        # Terminal info has full-game cumulative breakdown
+        stages.append(stage)
         all_breakdowns.append(info.get("rewardBreakdown", {}))
+
+        flags = game_metrics.generate_flags()
+        all_flags.append(flags)
+        aggregates = game_metrics.compute_aggregate()
+        all_aggregates.append(aggregates)
+
+        # Per-game one-liner
+        warn_count = sum(1 for sev, _ in flags if sev == "WARN")
+        flag_summary = f" [{warn_count} WARN]" if warn_count > 0 else ""
         print(
-            f"  Game {i+1}/{n_games}: Rank={ranks[-1]}, "
-            f"Stage={stages[-1]}, Reward={total_reward:.2f}"
+            f"  Game {i+1}/{n_games}: Rank={rank}, "
+            f"Stage={stage}, Reward={total_reward:.2f}{flag_summary}"
         )
 
+    # ── Summary ──────────────────────────────────────────────
     print(f"\nEvaluation Results ({n_games} games):")
     print(f"  Mean Rank:    {np.mean(ranks):.2f} +/- {np.std(ranks):.2f}")
     print(f"  Mean Reward:  {np.mean(rewards):.2f} +/- {np.std(rewards):.2f}")
@@ -380,7 +439,7 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
     print(f"  Win Rate:     {sum(1 for r in ranks if r == 1) / n_games:.1%}")
     print(f"  Top 4 Rate:   {sum(1 for r in ranks if r <= 4) / n_games:.1%}")
 
-    # Print mean reward breakdown across all games
+    # ── Mean Reward Breakdown ────────────────────────────────
     if all_breakdowns:
         all_keys = sorted(set(k for bd in all_breakdowns for k in bd))
         print(f"\n  --- Mean Reward Breakdown (per game, {n_games} games) ---")
@@ -397,6 +456,32 @@ def evaluate(model_path: str, server_url: str, n_games: int = 20):
         print(f"    {'─' * 47}")
         marker = "+" if total_mean > 0 else " "
         print(f"    {'TOTAL':<24} {marker}{total_mean:>8.2f}")
+
+    # ── Behavioral Aggregates ────────────────────────────────
+    if all_aggregates:
+        agg_keys = sorted(set(k for agg in all_aggregates for k in agg))
+        if agg_keys:
+            print(f"\n  --- Behavioral Aggregates (mean across {n_games} games) ---")
+            for key in agg_keys:
+                vals = [agg.get(key, 0.0) for agg in all_aggregates if key in agg]
+                if not vals:
+                    continue
+                mean_val = np.mean(vals)
+                std_val = np.std(vals)
+                print(f"    {key:<28} {mean_val:>8.3f}  +/- {std_val:>6.3f}")
+
+    # ── Behavioral Flag Frequency ────────────────────────────
+    flag_counts: dict[str, int] = {}
+    for flags in all_flags:
+        for sev, msg in flags:
+            # Normalize: strip stage numbers for counting
+            tag = f"[{sev}] {msg.split(' at stage')[0].split(' for ')[0]}"
+            flag_counts[tag] = flag_counts.get(tag, 0) + 1
+    if flag_counts:
+        print(f"\n  --- Behavioral Flag Frequency ({n_games} games) ---")
+        for tag, count in sorted(flag_counts.items(), key=lambda x: -x[1]):
+            pct = count / n_games * 100
+            print(f"    {tag:<50} {count:>3}/{n_games}  ({pct:.0f}%)")
 
 
 if __name__ == "__main__":
