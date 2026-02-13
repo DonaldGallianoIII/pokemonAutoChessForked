@@ -236,33 +236,26 @@ export const REWARD_SELL_EVOLVED = -0.15
 // This is pure gold waste — the agent should use REMOVE_SHOP instead
 export const REWARD_BUY_THEN_SELL = -1.0
 
-// ─── Level-up reward (stage-gated pacing table) ────────────────────
-// Level-up only gives reward when the current stage >= minStage for that level.
-// Leveling earlier than minStage gives 0 reward (no penalty, just no incentive).
-// This prevents power-leveling (dumping gold into XP at stage 5 to hit level 7).
+// ─── Level-up reward v2 (economy-first design) ─────────────────────
+// High-level play: economy is king. Every gold spent on XP before 50g is
+// gold NOT earning interest. Leveling is almost always wrong early/mid game.
 //
-// The board-fill check (boardSize >= maxTeamSize - 2) is still applied on top.
+// Design: leveling is PENALIZED by default. Two exceptions:
+//   1. "Stage 9 level-to-5" window: stage 9 is PVE (Gyarados). You NEED to be
+//      level 5 to beat it and win an item. This is the ONE acceptable time to
+//      break economy for XP — but ONLY to reach level 5, nothing higher.
+//   2. "Rich leveling" (gold >= 50 AFTER the buy): once at max interest, spending
+//      4g on XP doesn't lose interest if you still have 50g+. This is correct
+//      play in mid-late game. Neutral (0 reward, 0 penalty).
 //
-// Pacing rationale (2 free XP/round, 4 XP per 4-gold buy):
-//   Level 3-4: cheap (4 XP each), fine to buy early → rewarded from stage 1
-//   Level 5:   costs 12 XP (3 buys = 12g) — don't rush before stage 6
-//   Level 6:   costs 12 XP more — stage 9+ keeps economy intact
-//   Level 7:   costs 18 XP (4-5 buys = 16-20g) — stage 13+ is on-pace
-//   Level 8:   costs 20 XP — stage 18+ (late game territory)
-//   Level 9:   costs 183 XP — stage 24+ (only achievable with sustained gold)
-//
-// reward: how much reward to grant when leveling at or after minStage.
-// Levels 3-4 are low-reward (trivial decisions); levels 7-8 are high-reward
-// (meaningful strategic choices about when to commit gold).
-export const LEVEL_UP_REWARD_TABLE: Record<number, { minStage: number; reward: number }> = {
-  3:  { minStage: 1,  reward: 0.03 },  // trivial, almost free
-  4:  { minStage: 3,  reward: 0.03 },  // still cheap
-  5:  { minStage: 6,  reward: 0.08 },  // first meaningful gold decision
-  6:  { minStage: 9,  reward: 0.10 },  // core mid-game level
-  7:  { minStage: 13, reward: 0.12 },  // expensive, must have economy
-  8:  { minStage: 18, reward: 0.15 },  // late-game commitment
-  9:  { minStage: 24, reward: 0.20 },  // huge gold sink, only when it counts
-}
+// Default penalty is moderate (-0.15) — strong enough to overcome any incidental
+// positive signal, but not so harsh it dominates placement rewards.
+// Calibration: interest bonus is 0.12/gold/round, gold standard is 0.30/round.
+// Losing one interest tier (dropping from 50g to 46g) costs ~0.42/round in shaping.
+// The -0.15 penalty stacks ON TOP of that lost income signal.
+export const REWARD_LEVEL_UP_PENALTY = -0.15         // default: leveling hurts economy
+export const REWARD_LEVEL_UP_STAGE9_TO5 = 0.10       // exception: level to 5 at stage 9 (PVE Gyarados)
+export const LEVEL_UP_RICH_THRESHOLD = 50            // gold floor: leveling at >= 50g is neutral (0)
 
 // Reroll reward: base incentive to refresh shop.
 // Layer 1: doubled when gold >= 50 (saving more is pointless, spend productively).

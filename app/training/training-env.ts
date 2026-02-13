@@ -91,7 +91,9 @@ import {
   REWARD_BUY_DUPLICATE_LATEGAME,
   REWARD_BUY_EVOLUTION,
   REWARD_BUY_EVOLUTION_LATEGAME,
-  LEVEL_UP_REWARD_TABLE,
+  LEVEL_UP_RICH_THRESHOLD,
+  REWARD_LEVEL_UP_PENALTY,
+  REWARD_LEVEL_UP_STAGE9_TO5,
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
   REWARD_REROLL_LATEGAME,
@@ -516,18 +518,24 @@ export class TrainingEnv {
       // Used for evo-from-reroll detection on the next BUY action.
       this.lastActionWasRefresh = (action === TrainingAction.REFRESH && actionExecuted)
 
-      // Level-up reward: stage-gated pacing table + board-fill check.
-      // Only rewards leveling when (a) stage is at or past the minStage for
-      // that level, and (b) board is reasonably filled. Leveling too early
-      // (power-leveling) gives 0 reward — no penalty, just no incentive.
+      // Level-up reward v2: economy-first. Leveling is penalized by default.
+      // Exception 1: leveling to exactly level 5 at stage 9 (PVE Gyarados).
+      // Exception 2: "rich leveling" — gold >= 50 AFTER the buy (no eco damage).
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
         const newLevel = agent.experienceManager.level
-        const entry = LEVEL_UP_REWARD_TABLE[newLevel]
-        if (entry && this.state.stageLevel >= entry.minStage) {
-          const maxTeamSize = getMaxTeamSize(newLevel, this.state.specialGameRule)
-          if (agent.boardSize >= maxTeamSize - 2) {
-            reward += entry.reward; this.trackReward("levelUp", entry.reward)
-          }
+        const goldAfter = agent.money // gold after the 4g was spent
+
+        if (newLevel === 5 && this.state.stageLevel === 9) {
+          // Stage 9 PVE window: the ONE acceptable time to break eco for level 5
+          reward += REWARD_LEVEL_UP_STAGE9_TO5
+          this.trackReward("levelUp_stage9", REWARD_LEVEL_UP_STAGE9_TO5)
+        } else if (goldAfter >= LEVEL_UP_RICH_THRESHOLD) {
+          // Rich leveling: still at max interest, no eco damage. Neutral (0).
+          this.trackReward("levelUp_rich", 0)
+        } else {
+          // Economy-breaking level-up: penalize
+          reward += REWARD_LEVEL_UP_PENALTY
+          this.trackReward("levelUp_penalty", REWARD_LEVEL_UP_PENALTY)
         }
       }
 
@@ -2828,16 +2836,19 @@ export class TrainingEnv {
         dupBuyRewards.set(playerId, prev + (lateGameBatch ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE))
       }
 
-      // Level-up reward: stage-gated pacing table (same logic as single-agent path)
+      // Level-up reward v2: economy-first (same logic as single-agent path)
       if (action === TrainingAction.LEVEL_UP && actionExecutedBatch) {
         const newLevel = player.experienceManager.level
-        const entry = LEVEL_UP_REWARD_TABLE[newLevel]
-        if (entry && this.state.stageLevel >= entry.minStage) {
-          const maxTeamSize = getMaxTeamSize(newLevel, this.state.specialGameRule)
-          if (player.boardSize >= maxTeamSize - 2) {
-            const prev = dupBuyRewards.get(playerId) ?? 0
-            dupBuyRewards.set(playerId, prev + entry.reward)
-          }
+        const goldAfter = player.money
+        let levelReward = 0
+        if (newLevel === 5 && this.state.stageLevel === 9) {
+          levelReward = REWARD_LEVEL_UP_STAGE9_TO5
+        } else if (goldAfter < LEVEL_UP_RICH_THRESHOLD) {
+          levelReward = REWARD_LEVEL_UP_PENALTY
+        }
+        if (levelReward !== 0) {
+          const prev = dupBuyRewards.get(playerId) ?? 0
+          dupBuyRewards.set(playerId, prev + levelReward)
         }
       }
 
