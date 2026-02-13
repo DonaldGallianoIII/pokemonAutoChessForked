@@ -276,8 +276,11 @@ export const REROLL_BOOST_LEVEL_THRESHOLD = 8 // player level where reroll rewar
 // Penalty = half the current interest reward signal per reroll.
 // Uses PRE-reroll money to compute interest (what you had before spending the 1g).
 // Example: at 30g (interest=3), penalty = -(3 × 0.12) / 2 = -0.18 per reroll.
+// FLOOR: at 0-9g interest is 0, so without a floor the penalty vanishes and the
+// agent gets a free +0.03 reroll reward.  Floor matches the 10g tier (-0.06).
 // DISABLED when gold pressure is active (non-SAFE tier) — if you're dying, spend freely.
 export const REROLL_ECO_PENALTY_DIVISOR = 2   // penalty = interestSignal / this value
+export const REROLL_ECO_PENALTY_FLOOR = -0.06 // minimum penalty even at 0 interest (matches 10g tier)
 
 // ─── Empty Turn Penalty (v1.5) ───────────────────────────────────────
 // Penalizes hitting END_TURN as the very first action (0 productive actions).

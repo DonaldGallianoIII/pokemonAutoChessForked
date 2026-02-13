@@ -125,6 +125,7 @@ import {
   TRAINING_SIMULATION_DT,
   TrainingAction,
   REROLL_ECO_PENALTY_DIVISOR,
+  REROLL_ECO_PENALTY_FLOOR,
   REWARD_EMPTY_TURN_PENALTY,
   EMPTY_TURN_MIN_STAGE,
   EMPTY_TURN_GOLD_FLOOR
@@ -571,7 +572,8 @@ export class TrainingEnv {
             const preRerollMoney = agent.money + 1 // reroll cost 1g already deducted
             const currentInterest = Math.min(agent.maxInterest ?? 5, Math.floor(preRerollMoney / 10))
             const interestSignal = currentInterest * REWARD_INTEREST_BONUS
-            const penalty = -(interestSignal / REROLL_ECO_PENALTY_DIVISOR)
+            const rawPenalty = -(interestSignal / REROLL_ECO_PENALTY_DIVISOR)
+            const penalty = Math.min(rawPenalty, REROLL_ECO_PENALTY_FLOOR) // floor: never weaker than -0.06
             if (penalty < 0) {
               reward += penalty; this.trackReward("rerollBelowEco", penalty)
             }
