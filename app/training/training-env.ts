@@ -75,8 +75,11 @@ import {
   OBS_OPPONENT_FEATURES,
   OBS_PROPOSITION_FEATURES,
   OBS_PROPOSITION_SLOTS,
+  BATTLE_WIN_SCALING,
+  BATTLE_LOSS_SCALING,
   BENCH_DEAD_WEIGHT_BY_STAGE,
   UNIT_QUALITY_STAGES,
+  UNIT_QUALITY_RARITY_DISCOUNT,
   GOLD_EXCESS_BASE_RATE,
   GOLD_EXCESS_GRACE,
   GOLD_EXCESS_MAX_PENALTY,
@@ -92,6 +95,9 @@ import {
   REWARD_MOVE_FIDGET,
   REWARD_REROLL,
   REWARD_REROLL_LATEGAME,
+  REROLL_BOOST_GOLD_THRESHOLD,
+  REROLL_BOOST_LEVEL_THRESHOLD,
+  REWARD_EVO_FROM_REROLL,
   REWARD_HP_SCALE,
   REWARD_KEEP_LEGENDARY,
   REWARD_KEEP_UNIQUE,
@@ -175,6 +181,7 @@ export class TrainingEnv {
   lastSoldName: string | null = null  // name of last sold unit, for buy-then-sell detection
   lastBoughtName: string | null = null  // name of last bought unit, for buy-then-sell detection
   lastActionWasBuy = false  // true if the immediately previous action was a successful BUY
+  lastActionWasRefresh = false  // true if the immediately previous action was a successful REFRESH
   lockShopUsedThisTurn = false  // prevent LOCK_SHOP spam (toggle once per turn max)
   totalSteps = 0
   lastBattleResult: BattleResult | null = null
@@ -329,6 +336,7 @@ export class TrainingEnv {
     this.lastSoldName = null
     this.lastBoughtName = null
     this.lastActionWasBuy = false
+    this.lastActionWasRefresh = false
     this.lockShopUsedThisTurn = false
     this.totalSteps = 0
     this.lastBattleResult = null
@@ -411,6 +419,15 @@ export class TrainingEnv {
       if (isBuy && actionExecuted && preBuyCopies >= 2) {
         const r = lateGame ? REWARD_BUY_EVOLUTION_LATEGAME : REWARD_BUY_EVOLUTION
         reward += r; this.trackReward("buyEvolution", r)
+
+        // v1.4: Evo-from-reroll bonus — if previous action was REFRESH and this buy
+        // triggers an evolution, give a rarity-scaled flat bonus. Teaches the agent
+        // that rerolling is productive when it finds upgrades.
+        if (this.lastActionWasRefresh && preBuyShopName) {
+          const evoRarity = getPokemonData(preBuyShopName as any).rarity
+          const evoBonus = REWARD_EVO_FROM_REROLL[evoRarity] ?? 0.50
+          reward += evoBonus; this.trackReward("evoFromReroll", evoBonus)
+        }
       } else if (isBuy && actionExecuted && preBuyCopies === 1) {
         const r = lateGame ? REWARD_BUY_DUPLICATE_LATEGAME : REWARD_BUY_DUPLICATE
         reward += r; this.trackReward("buyDuplicate", r)
@@ -461,6 +478,10 @@ export class TrainingEnv {
         this.lastBoughtName = null
       }
 
+      // Track refresh state: was the last action a successful REFRESH?
+      // Used for evo-from-reroll detection on the next BUY action.
+      this.lastActionWasRefresh = (action === TrainingAction.REFRESH && actionExecuted)
+
       // Level-up reward: only when board is reasonably filled
       if (action === TrainingAction.LEVEL_UP && actionExecuted) {
         const maxTeamSize = getMaxTeamSize(
@@ -472,10 +493,15 @@ export class TrainingEnv {
         }
       }
 
-      // Reroll reward: unconditional incentive to refresh shop (boosted late game)
+      // Reroll reward: incentive to refresh shop (boosted late game).
+      // v1.4 Layer 1: doubled when gold >= 50 (saving more is pointless past max interest).
+      // v1.4 Layer 2: doubled when level >= 8 (can't buy XP, rolling is only productive spend).
+      // Layers stack: level 9 with 50g+ → ×4 base reward.
       if (action === TrainingAction.REFRESH && actionExecuted) {
         this.cumulativeRerollCount++
-        const r = lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
+        let r = lateGame ? REWARD_REROLL_LATEGAME : REWARD_REROLL
+        if (agent.money >= REROLL_BOOST_GOLD_THRESHOLD) r *= 2
+        if (agent.experienceManager.level >= REROLL_BOOST_LEVEL_THRESHOLD) r *= 2
         reward += r; this.trackReward("reroll", r)
       }
 
@@ -1281,6 +1307,26 @@ export class TrainingEnv {
     }
 
     // Issue #2: Compute per-player rewards so ALL players get their combat reward.
+    // v1.4: Stage-scaled — late wins are worth more, losses scale at half rate.
+    const stage = this.state.stageLevel
+    let winScaling: number, lossScaling: number
+    if (stage >= 21) {
+      winScaling = BATTLE_WIN_SCALING.STAGE_21_PLUS
+      lossScaling = BATTLE_LOSS_SCALING.STAGE_21_PLUS
+    } else if (stage >= 16) {
+      winScaling = BATTLE_WIN_SCALING.STAGE_16_20
+      lossScaling = BATTLE_LOSS_SCALING.STAGE_16_20
+    } else if (stage >= 11) {
+      winScaling = BATTLE_WIN_SCALING.STAGE_11_15
+      lossScaling = BATTLE_LOSS_SCALING.STAGE_11_15
+    } else if (stage >= 6) {
+      winScaling = BATTLE_WIN_SCALING.STAGE_6_10
+      lossScaling = BATTLE_LOSS_SCALING.STAGE_6_10
+    } else {
+      winScaling = BATTLE_WIN_SCALING.STAGE_1_5
+      lossScaling = BATTLE_LOSS_SCALING.STAGE_1_5
+    }
+
     const rewards = new Map<string, number>()
     this.state.players.forEach((player, id) => {
       if (!player.alive) {
@@ -1291,8 +1337,8 @@ export class TrainingEnv {
       if (lastHistory) {
         const result = lastHistory.result as BattleResult
         let r: number
-        if (result === BattleResult.WIN) { r = REWARD_PER_WIN }
-        else if (result === BattleResult.DEFEAT) { r = REWARD_PER_LOSS }
+        if (result === BattleResult.WIN) { r = REWARD_PER_WIN * (1 + winScaling) }
+        else if (result === BattleResult.DEFEAT) { r = REWARD_PER_LOSS * (1 + lossScaling) }
         else { r = REWARD_PER_DRAW }
         rewards.set(id, r)
         if (id === this.agentId) this.trackReward("battleResult", r)
@@ -1445,6 +1491,8 @@ export class TrainingEnv {
 
     // 6.8: Board Unit Quality Penalty — pressure to upgrade/replace 1-star units.
     // Units contributing to an active synergy get lighter penalty.
+    // v1.4: Steeper late-game penalties + rarity discount (holding a 1-star Legendary
+    // for a pair is correct play, while a 1-star Common at stage 20 is genuinely bad).
     this.state.players.forEach((player, id) => {
       if (!player.alive || player.isBot) return
       const stage = this.state.stageLevel
@@ -1468,10 +1516,12 @@ export class TrainingEnv {
       let totalPenalty = 0
       player.board.forEach((p) => {
         if (p.positionY > 0 && p.stars === 1) {
-          // Check if this unit contributes to any active synergy
           const data = getPokemonData(p.name)
           const hasActiveSynergy = data.types.some((t: Synergy) => activeSynergies.has(t))
-          totalPenalty += hasActiveSynergy ? rates.withSynergy : rates.withoutSynergy
+          const basePenalty = hasActiveSynergy ? rates.withSynergy : rates.withoutSynergy
+          // Rarity discount: higher-rarity 1-stars are less punished
+          const discount = UNIT_QUALITY_RARITY_DISCOUNT[data.rarity] ?? 0
+          totalPenalty += basePenalty * (1 - discount)
         }
       })
       if (totalPenalty < 0) {

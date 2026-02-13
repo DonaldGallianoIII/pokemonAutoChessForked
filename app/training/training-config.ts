@@ -84,6 +84,25 @@ export const TOTAL_ACTIONS = 92
 export const REWARD_PER_WIN = 0.75
 export const REWARD_PER_LOSS = -0.5
 export const REWARD_PER_DRAW = 0.0
+
+// ─── Stage-Scaled Battle Rewards (v1.4) ──────────────────────────────
+// Late-game wins are worth more to incentivize board investment.
+// Losses scale at half rate so the agent isn't over-punished for losing late.
+// Formula: reward × (1 + scaling). Win at stage 22 → 0.75 × 2.5 = 1.875.
+export const BATTLE_WIN_SCALING: Record<string, number> = {
+  STAGE_1_5:     0,     // ×1.0 (base)
+  STAGE_6_10:    0.25,  // ×1.25
+  STAGE_11_15:   0.5,   // ×1.5
+  STAGE_16_20:   1.0,   // ×2.0
+  STAGE_21_PLUS: 1.5    // ×2.5
+}
+export const BATTLE_LOSS_SCALING: Record<string, number> = {
+  STAGE_1_5:     0,     // ×1.0 (base)
+  STAGE_6_10:    0.125, // ×1.125
+  STAGE_11_15:   0.25,  // ×1.25
+  STAGE_16_20:   0.5,   // ×1.5
+  STAGE_21_PLUS: 0.75   // ×1.75
+}
 // Final placement reward lookup: index 0 = rank 1 (1st place), index 7 = rank 8 (last).
 // Steep curve: big rewards for winning, brutal penalties for losing.
 // Only top-3 get positive reward; 4th is now punished (-3) to prevent coasting.
@@ -151,14 +170,30 @@ export const BENCH_DEAD_WEIGHT_BY_STAGE: Record<string, number> = {
   STAGE_21_PLUS: -0.10
 }
 
-// ─── New: Board Unit Quality Penalty (v1.3) ─────────────────────────
+// ─── Board Unit Quality Penalty (v1.4) ───────────────────────────────
 // Pressure the agent to upgrade or replace 1-star units as the game progresses.
 // Units contributing to an active synergy (at/above first breakpoint) get lighter penalty.
+// v1.4: Steeper late-game penalties (stage 19+: doubled from v1.3).
+// Also rarity-aware: higher-rarity 1-stars get a discount (holding for a pair is correct play).
 export const UNIT_QUALITY_STAGES: Record<string, { withSynergy: number; withoutSynergy: number }> = {
   STAGE_1_8:     { withSynergy: 0,     withoutSynergy: 0 },
   STAGE_9_13:    { withSynergy: -0.01, withoutSynergy: -0.03 },
-  STAGE_14_18:   { withSynergy: -0.02, withoutSynergy: -0.06 },
-  STAGE_19_PLUS: { withSynergy: -0.05, withoutSynergy: -0.10 }
+  STAGE_14_18:   { withSynergy: -0.03, withoutSynergy: -0.08 },
+  STAGE_19_PLUS: { withSynergy: -0.08, withoutSynergy: -0.18 }
+}
+// Rarity discount for unit quality penalty: higher-rarity 1-stars are less punished
+// because holding them for a pair/triple is legitimate strategy.
+// Discount multiplied against the penalty: 0% = full penalty, 80% = only 20% of penalty.
+export const UNIT_QUALITY_RARITY_DISCOUNT: Record<string, number> = {
+  COMMON:    0,    // full penalty
+  UNCOMMON:  0.1,  // 90% of penalty
+  RARE:      0.3,  // 70% of penalty
+  EPIC:      0.5,  // 50% of penalty
+  ULTRA:     0.7,  // 30% of penalty
+  UNIQUE:    0.8,  // 20% of penalty
+  LEGENDARY: 0.8,  // 20% of penalty
+  HATCH:     0.2,  // 80% of penalty
+  SPECIAL:   0.4   // 60% of penalty
 }
 
 // Self-play mode: when true, all 8 players are RL agents controlled via /step-multi.
@@ -191,10 +226,32 @@ export const REWARD_BUY_THEN_SELL = -1.0
 // Prevents the "level to 9 with 3 units" degenerate strategy
 export const REWARD_LEVEL_UP = 0.10
 
-// Reroll reward: unconditional small incentive to refresh shop
-// Teaches the agent that rerolling exists and is useful (find duplicates, upgrades, etc.)
+// Reroll reward: base incentive to refresh shop.
+// Layer 1: doubled when gold >= 50 (saving more is pointless, spend productively).
+// Layer 2: doubled when level >= 8 (can't buy XP, rolling is the only productive spend).
+// These stack: level 9 with 50g+ → ×4 base reward.
 export const REWARD_REROLL = 0.03
 export const REWARD_REROLL_LATEGAME = 0.05   // after stage 20, stronger push to spend gold on rerolls
+export const REROLL_BOOST_GOLD_THRESHOLD = 50 // gold level where reroll reward doubles
+export const REROLL_BOOST_LEVEL_THRESHOLD = 8 // player level where reroll reward doubles
+
+// ─── Evo-from-Reroll Bonus (v1.4) ───────────────────────────────────
+// Flat bonus when a reroll leads to buying an evolution (star-up).
+// Only fires if the agent's previous action was REFRESH and the current BUY triggers evo.
+// Rarity-scaled: finding a Legendary upgrade is worth more than a Common upgrade.
+// These are ADDITIVE (not multiplied by the layer 1/2 reroll boosts) to prevent runaway.
+// Keys match Rarity enum values from types/enum/Game.
+export const REWARD_EVO_FROM_REROLL: Record<string, number> = {
+  COMMON:    0.50,
+  UNCOMMON:  0.75,
+  RARE:      1.00,
+  EPIC:      1.50,
+  ULTRA:     2.00,
+  UNIQUE:    2.00,
+  LEGENDARY: 2.00,
+  HATCH:     0.75,
+  SPECIAL:   1.00
+}
 
 // Per-step bonus for keeping unique/legendary units on board (not bench, not sold)
 export const REWARD_KEEP_UNIQUE = 0.007
