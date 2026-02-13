@@ -497,6 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--ent-coef", type=float, default=0.10, help="Entropy coefficient")
     parser.add_argument("--save-dir", default="training/checkpoints", help="Checkpoint directory")
     parser.add_argument("--log-dir", default="training/logs", help="TensorBoard log directory")
+    parser.add_argument("--run-name", default=None, help="Run name for namespacing logs/checkpoints (creates subdirs under save-dir and log-dir)")
     parser.add_argument("--resume", default=None, help="Resume from checkpoint path")
     parser.add_argument(
         "--phase", default="A", choices=["A", "B"],
@@ -510,6 +511,13 @@ if __name__ == "__main__":
     parser.add_argument("--benchmark", action="store_true", help="Just run benchmark")
 
     args = parser.parse_args()
+
+    # --run-name creates subdirectories so parallel runs don't collide
+    save_dir = args.save_dir
+    log_dir = args.log_dir
+    if args.run_name:
+        save_dir = os.path.join(save_dir, args.run_name)
+        log_dir = os.path.join(log_dir, args.run_name)
 
     if args.benchmark:
         wait_for_server(args.server_url)
@@ -525,8 +533,8 @@ if __name__ == "__main__":
             batch_size=args.batch_size,
             n_steps=args.n_steps,
             ent_coef=args.ent_coef,
-            save_dir=args.save_dir,
-            log_dir=args.log_dir,
+            save_dir=save_dir,
+            log_dir=log_dir,
             resume_from=args.resume,
             phase=args.phase,
             num_envs=args.num_envs,
